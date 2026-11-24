@@ -1,5 +1,15 @@
 {
   "run_name": "system",
+  "perceive": {
+    "models_dir": "models",
+    "num_threads": 2,
+    "language": "zh",
+    "min_silence_seconds": 0.3,
+    "max_speech_seconds": 15,
+    "tag_window_seconds": 2,
+    "tag_min_db": -50,
+    "spike_window": 30
+  },
   "signals": {
     "laugh_words": [
       "哈哈",

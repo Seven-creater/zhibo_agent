@@ -62,6 +62,22 @@ python3 -m zhibo run --config configs/live_glm.json --data data/live_<日期_时
 
 先按"异常前 45 秒到结束后 10 秒"截宽窗口，按说话停顿切成编号小段，每段给 GLM 一张截图和这段的弹幕；GLM 只回答铺垫、高潮、反应分别是哪几段，最终切点取这些段的边界（模型不报时间戳）。所有请求先记账再发出，重跑时直接回放，不重复花钱。
 
+### 声音感知（重构第 2 阶段，暂时只能离线补算）
+
+第一次用先装依赖和模型（建项目 `.venv`，装 sherpa-onnx、numpy，下载约 280 MB 模型到 `models/`）：
+
+```bash
+scripts/fetch_models.sh
+```
+
+然后给一个数据集补算声音感知（优先用 `audio.json` 的整场音频，老数据集从录像里取声音）：
+
+```bash
+.venv/bin/python -m zhibo perceive --data data/live_<日期_时间>
+```
+
+输出 `perception/<room_id>.jsonl`（每秒一行：音量 dBFS、相对突变、短促爆发、过零率、说话占比，以及笑声、喊叫、欢呼、枪炮、音乐的概率）和 `transcript/<room_id>.jsonl`（主播的逐句稿）。M1 上约 25 倍实时。这些结果还没有接进检测，接入是第 3 阶段。
+
 ## 代码结构
 
 重构进行中（方案见 [docs/重构方案_声音主导.md](docs/重构方案_声音主导.md)）。第 1 阶段只搬了结构、没改行为。
@@ -73,7 +89,7 @@ zhibo/
   collect.py       实时采集：dyhub 弹幕 + 录制 + 引擎 + 即时重放
   core/            models 数据结构 · config 配置 · ledger 模型请求账本 · media FFmpeg 工具
   ingest/          douyin 抖音接口 · hub dyhub 客户端 · recorder 录制（环形缓冲 + 整场音频） · sources 回放数据源
-  perceive/        chat 弹幕信号（以后加 audio、speech、tagger、scene）
+  perceive/        chat 弹幕信号 · audio 音量特征 · speech 说话检测和转写 · tagger 声音分类 · hearing 声音感知总装（以后加 scene）
   detect/          episode 异常开始/结束 · attribution 归因
   act/             replay 即时重放保留策略 · scheduler 录制路数调度
   edit/            backtrack 回溯找边界 · judge 判定器 · render 出片
@@ -116,6 +132,8 @@ evaluate + report：指标、逐条对照、基线对照           evaluate/    
 | `messages/<room_id>.jsonl` | 每行一条消息：`room_id`、`recv_ts`、`type`、`payload` |
 | `recordings.json` | 每个直播间的录像：单段写成对象，多段写成列表；每段有文件路径和第 0 秒对应的 epoch 时间（时钟对齐） |
 | `audio.json` | 实测采集才有：每个直播间的整场音频（`recordings/<room_id>/audio_<开始毫秒>.ts`），每段有文件路径、第 0 秒对应的 epoch 时间和时长。画面只保留触发片段，声音全程保留 |
+| `perception/<room_id>.jsonl` | `perceive` 命令补算：每秒一行声音感知，字段 `t`（epoch 秒）、`db`、`rms`、`spike`、`burst`、`zcr`、`speech`、`laugh`、`scream`、`cheer`、`gun`、`music` |
+| `transcript/<room_id>.jsonl` | `perceive` 命令补算：主播逐句稿，`start`、`end`（epoch 秒）、`text` |
 | `gold.json` | 金标准高光：起止、原因、有没有信号峰 |
 | `causes.json` | 原因标注时段，用来算归因准确率 |
 | `manifest.json` | 文件哈希（数据集冻结） |

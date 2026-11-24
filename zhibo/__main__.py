@@ -5,6 +5,7 @@
   python3 -m zhibo run --config configs/demo.json [--set judge.kind=mock ...]
   python3 -m zhibo eval --run runs/system    # 只重算指标和报告
   python3 -m zhibo collect --room 陈泽=<直播间号> --start-hub   # 实测采集
+  .venv/bin/python -m zhibo perceive --data data/live_<…>      # 给数据集补算声音感知（要项目 .venv）
 """
 from __future__ import annotations
 
@@ -81,6 +82,15 @@ def cmd_collect(args) -> None:
     run_collect(args, load_config(Path(args.config)))
 
 
+def cmd_perceive(args) -> None:
+    try:
+        import sherpa_onnx  # noqa: F401  模型加载时才真正用到，这里先检查装没装
+        from .perceive.hearing import perceive_dataset
+    except ImportError as e:
+        raise SystemExit(f"声音感知需要项目 .venv 里的 numpy 和 sherpa-onnx（{e}）。用 .venv/bin/python -m zhibo perceive ...")
+    perceive_dataset(Path(args.data), load_config(Path(args.config), args.set or []))
+
+
 def main(argv=None) -> None:
     ap = argparse.ArgumentParser(prog="zhibo", description="抖音直播高光切片 Agent（离线回放 demo）")
     sub = ap.add_subparsers(dest="cmd", required=True)
@@ -110,6 +120,11 @@ def main(argv=None) -> None:
     p.add_argument("--full-record", action="store_true", help="全程录制（默认是环形缓冲，只保留触发的片段）")
     p.add_argument("--config", default="configs/live.json")
     p.set_defaults(fn=cmd_collect)
+    p = sub.add_parser("perceive", help="给数据集补算声音感知：每秒音量、笑声等和逐句稿（要项目 .venv）")
+    p.add_argument("--data", required=True)
+    p.add_argument("--config", default="configs/live.json")
+    p.add_argument("--set", action="append")
+    p.set_defaults(fn=cmd_perceive)
     p = sub.add_parser("eval")
     p.add_argument("--run", required=True)
     p.add_argument("--data", default="data/demo")
