@@ -8,8 +8,9 @@ from __future__ import annotations
 import hashlib
 import json
 import shutil
+import copy
 import time
-from collections import Counter
+from collections import Counter, deque
 from dataclasses import asdict
 from pathlib import Path
 from typing import Any, Dict, List
@@ -45,7 +46,18 @@ def run_pipeline(cfg: Dict[str, Any], dataset_dir: Path, out_dir: Path) -> Dict[
     aggs = {rid: SignalAggregator(rid, cfg) for rid in rooms}
     dets = {rid: HeatDetector(rid, cfg) for rid in rooms}
     sched = Scheduler(rooms, cfg)
+    b0 = cfg["backtrack"]
     judge = make_judge(cfg["judge"])
+    if hasattr(judge, "base_dir"):
+        judge.base_dir = out_dir  # 截图路径相对于本次运行的输出目录
+    refine = bool(cfg["judge"].get("refine"))
+    plan_cfg = cfg
+    if refine:  # 先粗后细：先截一个宽窗口，让判定器在里面选段，最后按选中的段收紧切点
+        plan_cfg = copy.deepcopy(cfg)
+        plan_cfg["backtrack"].update(signal_lag_seconds=0, preroll_seconds=float(b0["coarse_pre_seconds"]),
+                                     postroll_seconds=float(b0["coarse_post_seconds"]),
+                                     max_seconds=float(b0["coarse_max_seconds"]))
+    room_chats = {rid: deque(maxlen=50000) for rid in rooms}  # (时刻, 弹幕)，给判定器按段看弹幕
     ledger = Ledger(Path(cfg["ledger"]["path"]), replay_only=bool(cfg["ledger"]["replay_only"]))
     bounds: Dict[str, List[float]] = {}
     signals: List[Dict[str, Any]] = []
@@ -82,12 +94,14 @@ def run_pipeline(cfg: Dict[str, Any], dataset_dir: Path, out_dir: Path) -> Dict[
                 status="lost_not_recording", note="高潮时刻没有录像（录制中断或还没开始）",
             ))
             return
-        p = backtrack.plan(ev, rec, rec_bounds(rec), cfg)
+        p = backtrack.plan(ev, rec, rec_bounds(rec), plan_cfg)
         # 候选不能超出这个直播间的数据范围（实测在数据末尾的异常，收尾时间会超出最后一条消息）
         if room.end_ts is not None and p.end > room.end_ts:
             p.end, p.end_source = room.end_ts, "data_end"
         if p.start < room.start_ts:
             p.start, p.start_source = room.start_ts, "data_start"
+        # 候选窗口可能比检测时刻还晚（先粗后细时会往后多留几秒），要等窗口走完才能判定
+        now = max(now, p.end)
         cand = Candidate(
             cand_id=f"{ev.event_id}-c", room_id=ev.room_id, event_id=ev.event_id, cause=attr.cause,
             start=p.start, end=p.end, start_source=p.start_source, end_source=p.end_source,
@@ -115,7 +129,13 @@ def run_pipeline(cfg: Dict[str, Any], dataset_dir: Path, out_dir: Path) -> Dict[
         frames = []
         n_frames = int(cfg["judge"].get("frames", 0))
         if n_frames and judge.kind != "accept_all":
-            times = [p.start + 1, ev.peak, p.end - 1][:n_frames]
+            if refine:  # 每段中间一张图，最多 frames_max 张
+                segs = p.segments
+                k = int(cfg["judge"].get("frames_max", 8))
+                pick = segs if len(segs) <= k else [segs[round(i * (len(segs) - 1) / (k - 1))] for i in range(k)]
+                times = [(sg["start"] + sg["end"]) / 2 for sg in pick]
+            else:
+                times = [p.start + 1, ev.peak, p.end - 1][:n_frames]
             paths = media.extract_frames(rec.path, [rec.rel(t) for t in times], out_dir / "evidence" / cand.cand_id)
             frames = [str(Path(x).relative_to(out_dir)) for x in paths]
         curve = [s["chat_users"] for s in signals if s["room_id"] == ev.room_id and p.start <= s["t"] <= p.end]
@@ -126,7 +146,9 @@ def run_pipeline(cfg: Dict[str, Any], dataset_dir: Path, out_dir: Path) -> Dict[
             "room": {"room_id": room.room_id, "anchor": room.anchor, "category": room.category},
             "attribution": {"cause": attr.cause, "confidence": attr.confidence, "evidence": attr.evidence},
             "segments": [
-                {"id": s["id"], "start": round(s["start"] - p.start, 2), "end": round(s["end"] - p.start, 2)}
+                {"id": s["id"], "start": round(s["start"] - p.start, 2), "end": round(s["end"] - p.start, 2),
+                 "chats": [t[:20] for t, _ in Counter(
+                     x for ts, x in room_chats[ev.room_id] if s["start"] <= ts < s["end"] and x).most_common(8)]}
                 for s in p.segments
             ],
             "evidence": {
@@ -154,6 +176,15 @@ def run_pipeline(cfg: Dict[str, Any], dataset_dir: Path, out_dir: Path) -> Dict[
             cand.status, cand.note = "rejected", cand.judge["reason"]
             return
         cand.status = "accepted"
+        if refine:
+            chosen = [sid for part in ("setup", "climax", "reaction") for sid in cand.judge["structure"].get(part, [])]
+            spans = [sg for sg in p.segments if sg["id"] in chosen]
+            if spans:
+                ns, ne = min(sg["start"] for sg in spans), max(sg["end"] for sg in spans)
+                mn, mx = float(b0["min_seconds"]), float(b0["max_seconds"])
+                ne = min(max(ne, ns + mn), ns + mx, p.end)
+                cand.start, cand.end = round(ns, 3), round(ne, 3)
+                cand.start_source = cand.end_source = "judge_segment"
         if cfg["render"]["enabled"]:
             t0 = time.time()
             cand.clip = render_clip(cand, rec, out_dir, cfg)
@@ -182,6 +213,8 @@ def run_pipeline(cfg: Dict[str, Any], dataset_dir: Path, out_dir: Path) -> Dict[
             process_second(cur)
             cur += 1
         aggs[msg.room_id].feed(msg)
+        if msg.type == "chat":
+            room_chats[msg.room_id].append((msg.recv_ts, msg.payload.get("text", "")))
     end_t = max((r.end_ts or cur + 1) for r in rooms.values())
     while cur is not None and cur < end_t:
         process_second(cur)

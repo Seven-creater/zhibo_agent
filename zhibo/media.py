@@ -43,12 +43,14 @@ def cut(src: Path, start: float, duration: float, out: Path) -> None:
         raise RuntimeError(f"ffmpeg 裁切失败：{r.stderr[-500:]}")
 
 
-def extract_frames(src: Path, times: List[float], out_dir: Path) -> List[str]:
+def extract_frames(src: Path, times: List[float], out_dir: Path, width: int = 480) -> List[str]:
+    """按时刻抽帧，缩到 width 宽（控制给模型的图片体积）。"""
     out_dir.mkdir(parents=True, exist_ok=True)
     paths = []
     for i, t in enumerate(times):
         out = out_dir / f"frame_{i}.jpg"
-        _run([ffmpeg(), "-hide_banner", "-y", "-ss", f"{t:.3f}", "-i", str(src), "-frames:v", "1", "-q:v", "4", str(out)])
+        _run([ffmpeg(), "-hide_banner", "-y", "-ss", f"{t:.3f}", "-i", str(src), "-frames:v", "1",
+              "-vf", f"scale={width}:-2", "-q:v", "5", str(out)])
         if out.exists():
             paths.append(str(out))
     return paths

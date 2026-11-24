@@ -106,6 +106,7 @@ def main(argv=None) -> None:
     p.add_argument("--quality", default="SD2", choices=["SD1", "SD2", "HD1", "FULL_HD1"],
                    help="录制清晰度：SD2 标清 720p 约 1 GB/时（默认），SD1 流畅 540p，HD1 高清，FULL_HD1 超清")
     p.add_argument("--min-free-gb", type=float, default=15.0, help="磁盘剩余低于这个值就停止录制")
+    p.add_argument("--full-record", action="store_true", help="全程录制（默认是环形缓冲，只保留触发的片段）")
     p.add_argument("--config", default="configs/live.json")
     p.set_defaults(fn=cmd_collect)
     p = sub.add_parser("eval")

@@ -2,17 +2,56 @@
   "run_name": "system",
   "signals": {
     "laugh_words": [
-      "哈哈", "笑死", "笑不活", "笑麻", "笑疯", "绷不住", "蚌埠住", "xswl", "草草", "卧槽", "？？", "??", "名场面", "离谱", "太强了",
-      "下饭", "白给", "人机", "菜死", "这都能", "整活", "抽象", "搞笑", "乐死", "乐子",
-      "[笑哭]", "[捂脸]", "[呲牙]", "[大笑]", "[奸笑]", "🤣", "😂"
+      "哈哈",
+      "笑死",
+      "笑不活",
+      "笑麻",
+      "笑疯",
+      "绷不住",
+      "蚌埠住",
+      "xswl",
+      "草草",
+      "卧槽",
+      "？？",
+      "??",
+      "名场面",
+      "离谱",
+      "太强了",
+      "下饭",
+      "白给",
+      "人机",
+      "菜死",
+      "这都能",
+      "整活",
+      "抽象",
+      "搞笑",
+      "乐死",
+      "乐子",
+      "[笑哭]",
+      "[捂脸]",
+      "[呲牙]",
+      "[大笑]",
+      "[奸笑]",
+      "🤣",
+      "😂"
     ],
     "copy_min_len": 10,
     "copy_min_users": 3,
     "copy_window_seconds": 60,
-    "lucky_hints": ["福袋", "中一次", "口令", "抽奖"]
+    "lucky_hints": [
+      "福袋",
+      "中一次",
+      "口令",
+      "抽奖"
+    ]
   },
   "heat": {
-    "channels": ["chat_users", "laugh_users", "likes", "gift"],
+    "channels": [
+      "chat_users",
+      "laugh_users",
+      "likes",
+      "gift"
+    ],
     "rolling_seconds": 5,
     "warmup_seconds": 90,
     "ewma_alpha": 0.01,
@@ -22,7 +61,12 @@
     "exit_seconds": 8,
     "max_seconds": 240,
     "baseline_update_max_z": 2.0,
-    "std_floor": {"chat_users": 1.0, "laugh_users": 1.0, "likes": 0.5, "gift": 0.8}
+    "std_floor": {
+      "chat_users": 1.0,
+      "laugh_users": 1.0,
+      "likes": 0.5,
+      "gift": 0.8
+    }
   },
   "attribution": {
     "enabled": true,
@@ -32,9 +76,12 @@
     "content_laugh_ratio": 0.15,
     "spam_unique_ratio": 0.25,
     "spam_copy_ratio": 0.5,
-    "lucky_copy_min": 5
+    "lucky_copy_min": 5,
+    "laugh_led_min_ratio": 0.05
   },
-  "trigger_causes": ["content"],
+  "trigger_causes": [
+    "content"
+  ],
   "scheduler": {
     "policy": "dynamic",
     "record_budget": 2,
@@ -55,14 +102,23 @@
     "max_seconds": 90,
     "silence_noise_db": -30,
     "silence_min_seconds": 0.3,
-    "duplicate_overlap": 0.5
+    "duplicate_overlap": 0.5,
+    "coarse_pre_seconds": 45,
+    "coarse_post_seconds": 10,
+    "coarse_max_seconds": 150
   },
   "judge": {
     "kind": "mock",
     "budget": 20,
     "max_revisions": 2,
     "mock_min_laugh_ratio": 0.15,
-    "frames": 3
+    "frames": 3,
+    "refine": false,
+    "frames_max": 8,
+    "model": "glm-5.3-flash",
+    "max_tokens": 4000,
+    "thinking_budget": 1200,
+    "timeout": 180
   },
   "ledger": {
     "path": "state/ledger.jsonl",

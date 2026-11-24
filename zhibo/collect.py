@@ -14,6 +14,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import queue
 import re
 import secrets
 import shutil
@@ -28,6 +29,10 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 from . import media
+from .attribution import CAUSE_ZH, attribute
+from .heat import HeatDetector
+from .models import RawMessage, Room
+from .signals import SignalAggregator
 
 HUB_DIR = Path(__file__).resolve().parent.parent / "third_party" / "dyhub"
 PROXY_VARS = ("http_proxy", "https_proxy", "all_proxy", "HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY")
@@ -158,20 +163,41 @@ def start_hub(port: int) -> subprocess.Popen:
 
 
 class Recorder(threading.Thread):
-    """一个直播间的录制：每次 ffmpeg 进程是一段，记下这段第一个字节落盘的时刻。"""
+    """一个直播间的录制，ffmpeg 按 10 秒切成小段。
+
+    - 环形缓冲模式（keep_seconds 有值）：只保留最近 keep_seconds 秒，过期且没被"保留"的小段直接删掉；
+      检测到搞笑异常时调用 pin(起, 止) 把那段标为保留。磁盘占用和直播时长无关（FR-3.2、FR-3.3）。
+    - 全程录制模式（keep_seconds=None）：所有小段都保留。
+    结束时 export() 把要保留的连续小段拼成文件，返回 recordings.json 需要的条目。
+    """
+
+    SEG_SECONDS = 10
 
     def __init__(self, hub: Hub, room_id: str, out_dir: Path, stop: threading.Event, log,
-                 sec_uid: Optional[str] = None, quality: str = "SD2", min_free_gb: float = 15.0):
+                 sec_uid: Optional[str] = None, quality: str = "SD2", min_free_gb: float = 15.0,
+                 keep_seconds: Optional[float] = None):
         super().__init__(daemon=True)
         self.hub, self.room_id, self.dir, self.stop, self.log = hub, room_id, out_dir, stop, log
         self.sec_uid, self.quality, self.min_free_gb = sec_uid, quality, min_free_gb
-        self.sessions: List[Dict[str, Any]] = []
+        self.keep_seconds = keep_seconds
+        self.segments: List[Dict[str, Any]] = []  # {path, start, end, deleted}
+        self.pins: List[List[float]] = []
         self.proc: Optional[subprocess.Popen] = None
         self.live = False
         self.disk_full = False
+        self.deleted_bytes = 0
+
+    def pin(self, start: float, end: float) -> None:
+        self.pins.append([start, end])
+
+    def _pinned(self, a: float, b: float) -> bool:
+        return any(a < pe and ps < b for ps, pe in list(self.pins))
 
     def _free_gb(self) -> float:
         return shutil.disk_usage(self.dir).free / 1e9
+
+    def disk_bytes(self) -> int:
+        return sum(p.stat().st_size for p in self.dir.rglob("*.ts")) if self.dir.exists() else 0
 
     def _url(self) -> Optional[str]:
         """优先按主页 ID 取指定清晰度的流；取不到再用 dyhub 给的播放器地址（可能是原画，体积大）。"""
@@ -183,6 +209,31 @@ class Recorder(threading.Thread):
                 return url
         self.log(f"[录制] {self.room_id} 取不到指定清晰度，退回播放器地址（可能是原画）")
         return self.hub.stream_url(self.room_id)
+
+    def _scan(self, sess: Path, start: float, known: set) -> None:
+        """读 ffmpeg 写的分段清单（每完成一段写一行：文件名,起,止，相对本段录制开头）。"""
+        lst = sess / "list.csv"
+        if not lst.exists():
+            return
+        for line in lst.read_text().splitlines():
+            parts = line.strip().split(",")
+            if len(parts) < 3 or parts[0] in known:
+                continue
+            known.add(parts[0])
+            self.segments.append({"path": sess / parts[0], "start": start + float(parts[1]),
+                                  "end": start + float(parts[2]), "deleted": False})
+
+    def _expire(self, now: float) -> None:
+        if self.keep_seconds is None:
+            return
+        for seg in self.segments:
+            if not seg["deleted"] and seg["end"] < now - self.keep_seconds and not self._pinned(seg["start"], seg["end"]):
+                try:
+                    self.deleted_bytes += seg["path"].stat().st_size
+                    seg["path"].unlink()
+                except OSError:
+                    pass
+                seg["deleted"] = True
 
     def run(self) -> None:
         self.dir.mkdir(parents=True, exist_ok=True)
@@ -197,19 +248,26 @@ class Recorder(threading.Thread):
             if not url:
                 self.stop.wait(10)
                 continue
-            path = self.dir / f"{int(time.time() * 1000)}.ts"
+            sess = self.dir / str(int(time.time() * 1000))
+            sess.mkdir(parents=True, exist_ok=True)
             self.proc = subprocess.Popen(
                 ["ffmpeg", "-hide_banner", "-loglevel", "error", "-nostdin", "-rw_timeout", "15000000",
-                 "-i", url, "-c", "copy", "-f", "mpegts", str(path)],
+                 "-i", url, "-c", "copy", "-f", "segment", "-segment_time", str(self.SEG_SECONDS),
+                 "-segment_format", "mpegts", "-reset_timestamps", "1",
+                 "-segment_list", str(sess / "list.csv"), "-segment_list_type", "csv", str(sess / "seg_%05d.ts")],
                 env=_env_no_proxy(), stdout=subprocess.DEVNULL, stderr=subprocess.PIPE,
             )
+            first = sess / "seg_00000.ts"
             start = None
+            known: set = set()
             last_check = time.time()
             while self.proc.poll() is None and not self.stop.is_set():
-                if start is None and path.exists() and path.stat().st_size > 0:
-                    start = time.time()  # 第一个字节落盘的时刻 ≈ 录像第 0 秒（误差待实测，Q-6）
-                if time.time() - last_check > 30:
+                if start is None and first.exists() and first.stat().st_size > 0:
+                    start = time.time()  # 第一个字节落盘的时刻 ≈ 本段录制第 0 秒（误差待实测，Q-6）
+                if start is not None and time.time() - last_check > 5:
                     last_check = time.time()
+                    self._scan(sess, start, known)
+                    self._expire(time.time())
                     if self._free_gb() < self.min_free_gb:
                         break
                 time.sleep(0.2)
@@ -220,20 +278,57 @@ class Recorder(threading.Thread):
                 except subprocess.TimeoutExpired:
                     self.proc.kill()
             err = (self.proc.stderr.read() or b"").decode("utf-8", "replace")[-300:]
-            if start and path.exists() and path.stat().st_size > 0:
-                self.sessions.append({"path": path.name, "start_ts": round(start, 3), "end_ts": round(time.time(), 3)})
-                self.log(f"[录制] {self.room_id} 一段结束，{path.stat().st_size / 1e6:.0f} MB" + (f"；{err.strip()}" if err.strip() else ""))
-            elif path.exists():
-                path.unlink()
+            if start is not None:
+                self._scan(sess, start, known)
+                self.log(f"[录制] {self.room_id} 一段录制结束，共 {len(known)} 个小段"
+                         + (f"；{err.strip()}" if err.strip() else ""))
             if not self.stop.is_set():
                 self.stop.wait(5)
 
+    def export(self, out_root: Path) -> List[Dict[str, Any]]:
+        """把要保留的小段按连续区间拼成文件，删掉其余小段。返回 recordings.json 的条目。"""
+        segs = sorted((s for s in self.segments if not s["deleted"] and s["path"].exists()), key=lambda s: s["start"])
+        if self.keep_seconds is not None:
+            segs = [s for s in segs if self._pinned(s["start"], s["end"])]
+        groups: List[List[Dict[str, Any]]] = []
+        for s in segs:
+            if groups and s["path"].parent == groups[-1][-1]["path"].parent and s["start"] - groups[-1][-1]["end"] < 1.0:
+                groups[-1].append(s)
+            else:
+                groups.append([s])
+        entries = []
+        for g in groups:
+            out = self.dir / f"{int(g[0]['start'] * 1000)}.ts"
+            lst = self.dir / "concat.txt"
+            lst.write_text("".join(f"file '{s['path'].resolve()}'\n" for s in g))
+            r = subprocess.run(["ffmpeg", "-hide_banner", "-loglevel", "error", "-y", "-f", "concat", "-safe", "0",
+                                "-i", str(lst), "-c", "copy", "-f", "mpegts", str(out)], capture_output=True, text=True)
+            lst.unlink()
+            dur = media.probe(out).get("duration") if r.returncode == 0 else None
+            if dur:
+                entries.append({"path": str(out.relative_to(out_root)), "start_ts": round(g[0]["start"], 3),
+                                "duration": round(dur, 3)})
+            else:
+                self.log(f"[录制] {self.room_id} 拼接失败：{r.stderr[-200:]}")
+        for sess in [p for p in self.dir.iterdir() if p.is_dir()]:
+            shutil.rmtree(sess, ignore_errors=True)
+        return entries
+
 
 class Collector:
-    def __init__(self, rooms: List[Dict[str, Optional[str]]], out: Path, hub: Hub, salt: str,
-                 quality: str = "SD2", min_free_gb: float = 15.0):
-        self.out, self.hub, self.salt = out, hub, salt
+    def __init__(self, rooms: List[Dict[str, Optional[str]]], out: Path, hub: Hub, salt: str, cfg: Dict[str, Any],
+                 quality: str = "SD2", min_free_gb: float = 15.0, full_record: bool = False):
+        self.out, self.hub, self.salt, self.cfg = out, hub, salt, cfg
         self.quality, self.min_free_gb = quality, min_free_gb
+        live = cfg.get("live", {})
+        self.pin_causes = set(live.get("pin_causes", ["content"]))
+        self.pin_pre = float(live.get("pin_pre_seconds", 60))
+        self.pin_post = float(live.get("pin_post_seconds", 20))
+        # 缓冲要盖住"异常最长持续时间 + 往前多留的时间 + 余量"，否则检测出来时前因已经被删了
+        self.keep_seconds = None if full_record else float(cfg["heat"]["max_seconds"]) + self.pin_pre + 60
+        self.q: "queue.Queue" = queue.Queue()
+        self.triggers: List[Dict[str, Any]] = []
+        self.anomalies = 0
         self.stop = threading.Event()
         (out / "messages").mkdir(parents=True, exist_ok=True)
         self.logf = (out / "collect.log").open("a", encoding="utf-8")
@@ -256,7 +351,8 @@ class Collector:
         self.files[rid] = (self.out / "messages" / f"{rid}.jsonl").open("a", encoding="utf-8")
         self.status[rid] = "waiting"
         self.recorders[rid] = Recorder(self.hub, rid, self.out / "recordings" / rid, self.stop, self.log,
-                                       sec_uid=r.get("sec_uid"), quality=self.quality, min_free_gb=self.min_free_gb)
+                                       sec_uid=r.get("sec_uid"), quality=self.quality, min_free_gb=self.min_free_gb,
+                                       keep_seconds=self.keep_seconds)
         self.rooms[rid] = r
         if self.started:
             self.recorders[rid].start()
@@ -319,6 +415,65 @@ class Collector:
             return {"type": "other", "payload": {**base, "method": method}}
         return None
 
+    def _detect(self) -> None:
+        """实时检测：和离线回放用同一套信号聚合、热度检测、归因代码（需求 8.3 节）。"""
+        aggs: Dict[str, SignalAggregator] = {}
+        dets: Dict[str, HeatDetector] = {}
+        cur: Dict[str, int] = {}
+
+        def tick(rid: str, t: int) -> None:
+            _, ev = dets[rid].update(aggs[rid].close(float(t)))
+            if ev:
+                self._on_event(ev)
+
+        while not (self.stop.is_set() and self.q.empty()):
+            try:
+                rid, msg = self.q.get(timeout=0.5)
+            except queue.Empty:
+                rid, msg = None, None
+            if rid is not None:
+                if rid not in aggs:
+                    aggs[rid], dets[rid], cur[rid] = SignalAggregator(rid, self.cfg), HeatDetector(rid, self.cfg), int(msg.recv_ts)
+                while cur[rid] < int(msg.recv_ts):
+                    tick(rid, cur[rid])
+                    cur[rid] += 1
+                aggs[rid].feed(msg)
+            now = int(time.time())
+            for r in list(cur):
+                while cur[r] < now - 2:  # 留 2 秒给晚到的消息
+                    tick(r, cur[r])
+                    cur[r] += 1
+        for r in list(dets):
+            ev = dets[r].flush(float(cur[r]))
+            if ev:
+                self._on_event(ev)
+
+    def _on_event(self, ev) -> None:
+        info = self.rooms[ev.room_id]
+        room = Room(ev.room_id, info["anchor"], "搞笑", "manual", self.first_ts.get(ev.room_id, ev.start),
+                    stream_start_known=False, sec_uid=info.get("sec_uid"))
+        attr = attribute(ev, room, self.cfg)
+        self.anomalies += 1
+        hhmm = time.strftime("%H:%M:%S", time.localtime(ev.start))
+        keep = attr.cause in self.pin_causes
+        msg = (f"[{'触发' if keep else '异常'}] {info['anchor']} {hhmm} 起 {ev.end - ev.start:.0f} 秒，"
+               f"{CAUSE_ZH.get(attr.cause, attr.cause)}，{ev.channel} z={ev.peak_z}")
+        if keep:
+            a, b = ev.start - self.pin_pre, ev.end + self.pin_post
+            self.recorders[ev.room_id].pin(a, b)
+            row = {"room_id": ev.room_id, "anchor": info["anchor"], "keep_start": round(a, 3), "keep_end": round(b, 3),
+                   "event": {"start": ev.start, "peak": ev.peak, "end": ev.end, "channel": ev.channel, "peak_z": ev.peak_z,
+                             "top_texts": ev.stats.get("top_texts")},
+                   "cause": attr.cause, "evidence": attr.evidence}
+            self.triggers.append(row)
+            with (self.out / "triggers.jsonl").open("a", encoding="utf-8") as f:
+                f.write(json.dumps(row, ensure_ascii=False) + "\n")
+            msg += f"，保留录像 {time.strftime('%H:%M:%S', time.localtime(a))}–{time.strftime('%H:%M:%S', time.localtime(b))}"
+            msg += f"；弹幕：{'、'.join((ev.stats.get('top_texts') or [])[:3])[:40]}"
+        else:
+            msg += "，不保留录像"
+        self.log(msg)
+
     def _keep_connected(self) -> None:
         while not self.stop.is_set():
             for rid in list(self.rooms):
@@ -338,11 +493,11 @@ class Collector:
             parts = []
             for rid, r in list(self.rooms.items()):
                 c = self.minute.pop(rid, Counter())
-                size = sum(p.stat().st_size for p in (self.out / "recordings" / rid).glob("*.ts")) / 1e9
+                size = self.recorders[rid].disk_bytes() / 1e6
                 parts.append(f"{r['anchor']}：在线 {self.online.get(rid, '-')}，弹幕 {c['chat']}/分，"
-                             f"笑点 {c['laugh']}/分，录像 {size:.2f} GB，{self.status[rid]}")
+                             f"笑点 {c['laugh']}/分，录像占用 {size:.0f} MB，{self.status[rid]}")
             parts += [f"{r['anchor']}：等待开播" for r in list(self.pending)]
-            self.log("[每分钟] " + "；".join(parts))
+            self.log("[每分钟] " + "；".join(parts) + f"｜累计异常 {self.anomalies}，触发保留 {len(self.triggers)}")
 
     def run(self, hours: float, laugh_words: List[str]) -> None:
         self.hub.ensure_account()
@@ -352,10 +507,14 @@ class Collector:
         threading.Thread(target=self._resolve_pending, daemon=True).start()
         threading.Thread(target=self._keep_connected, daemon=True).start()
         threading.Thread(target=self._monitor, daemon=True).start()
+        detector = threading.Thread(target=self._detect, daemon=True)
+        detector.start()
         deadline = time.time() + hours * 3600
         threading.Thread(target=lambda: (self.stop.wait(max(0, deadline - time.time())), self.stop.set()), daemon=True).start()
+        mode = ("全程录制" if self.keep_seconds is None else
+                f"环形缓冲（只保留最近 {self.keep_seconds / 60:.1f} 分钟，触发后保留异常前 {self.pin_pre:.0f} 秒到结束后 {self.pin_post:.0f} 秒）")
         self.log(f"开始采集：{len(self.rooms)} 个直播间，另有 {len(self.pending)} 位主播等待开播；"
-                 f"最长 {hours} 小时，Ctrl+C 结束。输出：{self.out}")
+                 f"最长 {hours} 小时，Ctrl+C 结束。录制方式：{mode}。输出：{self.out}")
         try:
             for ev in self.hub.events(self.stop):
                 rid = ev.get("roomId")
@@ -369,6 +528,7 @@ class Collector:
                 self.files[rid].write(json.dumps(row, ensure_ascii=False) + "\n")
                 self.first_ts.setdefault(rid, recv)
                 self.last_ts[rid] = recv
+                self.q.put((rid, RawMessage(rid, recv, m["type"], m["payload"])))
                 if m["type"] == "chat":
                     self.minute[rid]["chat"] += 1
                     if any(w in m["payload"]["text"] for w in laugh_words):
@@ -385,6 +545,7 @@ class Collector:
             self.stop.set()
             for rec in self.recorders.values():
                 rec.join(30)
+            detector.join(30)
             for f in self.files.values():
                 f.close()
             self.finalize()
@@ -392,13 +553,7 @@ class Collector:
     def finalize(self) -> None:
         rooms, recs = [], {}
         for rid, r in list(self.rooms.items()):
-            sessions = []
-            for s in self.recorders[rid].sessions:
-                p = self.out / "recordings" / rid / s["path"]
-                dur = media.probe(p).get("duration")
-                if dur:
-                    sessions.append({"path": f"recordings/{rid}/{s['path']}", "start_ts": s["start_ts"],
-                                     "duration": round(dur, 3)})
+            sessions = self.recorders[rid].export(self.out)
             if rid not in self.first_ts:
                 self.log(f"[收尾] {r['anchor']} 没有收到任何消息，跳过")
                 continue
@@ -419,6 +574,11 @@ class Collector:
             "files": {str(p.relative_to(self.out)): hashlib.sha256(p.read_bytes()).hexdigest() for p in files},
             "recordings": {rid: len(s) for rid, s in recs.items()},
         })
+        kept = sum(e["duration"] for s in recs.values() for e in s)
+        size = sum(p.stat().st_size for p in (self.out / "recordings").rglob("*.ts")) / 1e6 if (self.out / "recordings").exists() else 0
+        deleted = sum(r.deleted_bytes for r in self.recorders.values()) / 1e6
+        self.log(f"[收尾] 异常 {self.anomalies} 次，触发保留 {len(self.triggers)} 次；保留录像 {kept / 60:.1f} 分钟、{size:.0f} MB，"
+                 f"缓冲中丢弃 {deleted:.0f} MB")
         self.log(f"[收尾] 数据集已整理：{self.out}（录像 {sum(len(s) for s in recs.values())} 段）。"
                  f"下一步：python3 -m zhibo run --config configs/live.json --data {self.out}")
 
@@ -448,8 +608,8 @@ def cmd_collect(args, cfg: Dict[str, Any]) -> None:
 
     signal.signal(signal.SIGTERM, _on_term)
     try:
-        Collector(rooms, out, hub, salt_file.read_text().strip(), quality=args.quality,
-                  min_free_gb=args.min_free_gb).run(args.hours, cfg["signals"]["laugh_words"])
+        Collector(rooms, out, hub, salt_file.read_text().strip(), cfg, quality=args.quality,
+                  min_free_gb=args.min_free_gb, full_record=args.full_record).run(args.hours, cfg["signals"]["laugh_words"])
     finally:
         if proc:
             proc.terminate()

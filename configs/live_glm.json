@@ -1,0 +1,9 @@
+{
+  "extends": "live.json",
+  "run_name": "live_glm",
+  "judge": {
+    "kind": "glm",
+    "refine": true,
+    "budget": 30
+  }
+}

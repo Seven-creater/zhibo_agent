@@ -1,6 +1,17 @@
 {
   "extends": "demo.json",
   "run_name": "live",
-  "scheduler": {"record_budget": 10},
-  "judge": {"kind": "mock"}
+  "scheduler": {
+    "record_budget": 10
+  },
+  "judge": {
+    "kind": "mock"
+  },
+  "live": {
+    "pin_causes": [
+      "content"
+    ],
+    "pin_pre_seconds": 60,
+    "pin_post_seconds": 20
+  }
 }

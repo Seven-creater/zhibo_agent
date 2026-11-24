@@ -65,7 +65,11 @@ def attribute(ev: HeatEvent, room: Room, cfg: Dict[str, Any]) -> Attribution:
         ev_lines.append(f"弹幕大量重复（不同文本占比 {s['text_unique_ratio']}），没有笑点词")
         return Attribution(ev.event_id, "chat_spam", 0.6, ev_lines)
 
-    if s["laugh_ratio"] >= float(a["content_laugh_ratio"]):
+    # 大直播间弹幕多，笑点占比天然偏低；只要笑点信号本身是这次异常的主导信号，也算内容驱动（2026-11-24 实测）
+    laugh_led = ev.channel == "laugh_users" and s["laugh_ratio"] >= float(a.get("laugh_led_min_ratio", 0.05))
+    if s["laugh_ratio"] >= float(a["content_laugh_ratio"]) or laugh_led:
+        if laugh_led and s["laugh_ratio"] < float(a["content_laugh_ratio"]):
+            ev_lines.append(f"笑点信号是这次异常的主导信号（z={ev.peak_z}），虽然笑点占比只有 {s['laugh_ratio']:.0%}")
         ev_lines.append(f"{s['chat_users']} 位不同用户发弹幕，笑点/惊讶词占比 {s['laugh_ratio']:.0%}"
                         f"（已排除复制粘贴的串，串占 {s.get('copy_ratio', 0):.0%}）")
         ev_lines.append("排除：异常前后没有福袋/红包/PK 消息，不在开播期，礼物不集中在一人")
