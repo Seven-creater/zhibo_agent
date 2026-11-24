@@ -13,6 +13,7 @@ from .models import HeatEvent, SignalPoint
 
 CHANNEL_VALUE = {
     "chat_users": lambda pts: float(sum(p.chat_users for p in pts)),
+    "laugh_users": lambda pts: float(sum(p.laugh_users for p in pts)),  # 搞笑方向的主信号
     "likes": lambda pts: math.log1p(sum(p.likes for p in pts)),  # 点赞是成批来的，取对数压一压
     "gift": lambda pts: math.log1p(sum(p.gift_value for p in pts)),
 }

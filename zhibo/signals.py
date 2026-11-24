@@ -22,6 +22,7 @@ class SignalAggregator:
         self._users: set = set()
         self._texts: Counter = Counter()
         self._laugh = 0
+        self._laugh_users: set = set()
         self._gift_by_user: Counter = Counter()
         self._likes = 0
         self._enters = 0
@@ -36,6 +37,7 @@ class SignalAggregator:
             self._texts[text] += 1
             if any(w in text for w in self.laugh_words):
                 self._laugh += 1
+                self._laugh_users.add(p.get("user"))
         elif msg.type == "gift":
             # 同一次送礼会推多条：按 (用户, 礼物 ID, 分组 ID) 合并，只取连击数的增量
             key = (p.get("user"), str(p.get("gift_id")), str(p.get("group_id")))
@@ -61,6 +63,7 @@ class SignalAggregator:
             chat=self._chat,
             chat_users=len(self._users),
             laugh=self._laugh,
+            laugh_users=len(self._laugh_users),
             gift_value=float(sum(self._gift_by_user.values())),
             likes=self._likes,
             enters=self._enters,

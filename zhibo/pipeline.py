@@ -59,12 +59,12 @@ def run_pipeline(cfg: Dict[str, Any], dataset_dir: Path, out_dir: Path) -> Dict[
     def stage(cand: Candidate, name: str, now: float, t0: float) -> None:
         stages.append({"cand_id": cand.cand_id, "stage": name, "t": now, "wall_ms": round((time.time() - t0) * 1000, 1)})
 
-    def room_bounds(rid: str) -> List[float]:
-        if rid not in bounds:
-            rec = src.recording(rid)
+    def rec_bounds(rec) -> List[float]:
+        key = str(rec.path)
+        if key not in bounds:
             rel = media.silence_boundaries(rec.path, b["silence_noise_db"], b["silence_min_seconds"])
-            bounds[rid] = [rec.start_ts + x for x in rel]
-        return bounds[rid]
+            bounds[key] = [rec.start_ts + x for x in rel]
+        return bounds[key]
 
     def handle(ev: HeatEvent, now: float) -> None:
         events.append(ev)
@@ -74,8 +74,15 @@ def run_pipeline(cfg: Dict[str, Any], dataset_dir: Path, out_dir: Path) -> Dict[
         if attr.cause not in cfg["trigger_causes"]:
             return
         t0 = time.time()
-        rec = src.recording(ev.room_id)
-        p = backtrack.plan(ev, rec, room_bounds(ev.room_id), cfg)
+        rec = src.recording(ev.room_id, ev.peak)
+        if rec is None:
+            cands.append(Candidate(
+                cand_id=f"{ev.event_id}-c", room_id=ev.room_id, event_id=ev.event_id, cause=attr.cause,
+                start=ev.start, end=ev.end, start_source="none", end_source="none", created_at=now,
+                status="lost_not_recording", note="高潮时刻没有录像（录制中断或还没开始）",
+            ))
+            return
+        p = backtrack.plan(ev, rec, rec_bounds(rec), cfg)
         cand = Candidate(
             cand_id=f"{ev.event_id}-c", room_id=ev.room_id, event_id=ev.event_id, cause=attr.cause,
             start=p.start, end=p.end, start_source=p.start_source, end_source=p.end_source,

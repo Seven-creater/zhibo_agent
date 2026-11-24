@@ -1,0 +1,6 @@
+{
+  "extends": "demo.json",
+  "run_name": "live",
+  "scheduler": {"record_budget": 10},
+  "judge": {"kind": "mock"}
+}

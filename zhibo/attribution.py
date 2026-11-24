@@ -42,7 +42,7 @@ def attribute(ev: HeatEvent, room: Room, cfg: Dict[str, Any]) -> Attribution:
         return Attribution(ev.event_id, "pk", 0.8, ev_lines)
 
     since_start = ev.start - room.start_ts
-    if since_start < float(a["start_effect_seconds"]):
+    if room.stream_start_known and since_start < float(a["start_effect_seconds"]):
         ev_lines.append(f"异常开始于开播后 {since_start:.0f} 秒内")
         return Attribution(ev.event_id, "start_end", 0.7, ev_lines)
 

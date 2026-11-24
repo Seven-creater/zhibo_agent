@@ -18,6 +18,7 @@ class Room:
     source: str  # manual / hot_list / follow
     start_ts: float  # 开播时间
     end_ts: Optional[float] = None  # 下播时间，未知为 None
+    stream_start_known: bool = True  # False = start_ts 只是开始采集的时刻，不是真实开播时间
 
     def is_live(self, t: float) -> bool:
         return t >= self.start_ts and (self.end_ts is None or t < self.end_ts)
@@ -42,6 +43,7 @@ class SignalPoint:
     chat: int = 0
     chat_users: int = 0
     laugh: int = 0
+    laugh_users: int = 0  # 发笑点弹幕的不同用户数（防同一人刷屏）
     gift_value: float = 0.0  # 去重后的钻石价值
     likes: int = 0
     enters: int = 0

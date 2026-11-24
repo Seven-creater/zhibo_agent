@@ -23,6 +23,28 @@ python3 -m zhibo demo
 
 > 合成数据只用来检查流程。事件是按规则造的，系统规则也是照着写的，**指标数字不代表方法效果**。
 
+## 实测采集（真实直播间）
+
+弹幕用 [dyhub](https://github.com/ymstar/dyhub)（MIT，浏览器内核）采集，录制由我们自己用 ffmpeg 拉 dyhub 给出的直播流地址。第一次使用前先安装 dyhub（需要 Node ≥ 20 和 Chrome）：
+
+```bash
+git clone --depth 1 https://github.com/ymstar/dyhub.git third_party/dyhub
+cd third_party/dyhub && npm ci --ignore-scripts && npm run build && cd ../..
+```
+
+开始采集（没开播的直播间会每 30 秒重试，开播后自动接上，所以可以提前启动）：
+
+```bash
+python3 -m zhibo collect --start-hub --hours 4 --room 陈泽=<直播间号或链接> --room 德华=<...> --room coke=<...>
+```
+
+- 每分钟打印一行：在线人数、弹幕数、笑点弹幕数、录像大小、状态。
+- 按 Ctrl+C 结束，或到时间自动结束，然后自动整理成数据集（默认 `data/live_<日期_时间>/`）。
+- 跑分析：`python3 -m zhibo run --config configs/live.json --data data/live_<日期_时间>`。实测数据没有金标准，检出率等指标为空，主要看报告里的热度异常、归因和切片。
+- 不登录抖音账号，拿不到礼物数据（dyhub 游客态）。观众 ID 只存加盐哈希，昵称不落盘。
+- 所有连抖音的进程（dyhub、ffmpeg）都去掉了代理环境变量，直连。
+- 录像按直播流原样保存（720p 约 0.4 GB/小时，实测一次）；断流后会重新取地址、开新的一段。
+
 ## 数据流
 
 ```
@@ -72,7 +94,7 @@ evaluate + report：指标、逐条对照、基线对照           evaluate.py r
 |---|---|
 | `rooms.json` | 直播间列表：room_id、主播、品类、来源、开播/下播时间（epoch 秒） |
 | `messages/<room_id>.jsonl` | 每行一条消息：`room_id`、`recv_ts`、`type`、`payload` |
-| `recordings.json` | 每个直播间的录像文件，以及录像第 0 秒对应的 epoch 时间（时钟对齐） |
+| `recordings.json` | 每个直播间的录像：单段写成对象，多段写成列表；每段有文件路径和第 0 秒对应的 epoch 时间（时钟对齐） |
 | `gold.json` | 金标准高光：起止、原因、有没有信号峰 |
 | `causes.json` | 原因标注时段，用来算归因准确率 |
 | `manifest.json` | 文件哈希（数据集冻结） |

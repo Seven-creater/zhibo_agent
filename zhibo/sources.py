@@ -34,8 +34,11 @@ class ReplaySource:
         rooms = json.loads((self.dir / "rooms.json").read_text(encoding="utf-8"))
         self.rooms: List[Room] = [Room(**r) for r in rooms]
         recs = json.loads((self.dir / "recordings.json").read_text(encoding="utf-8"))
-        self.recordings: Dict[str, Recording] = {
-            rid: Recording(rid, self.dir / r["path"], r["start_ts"], r["duration"]) for rid, r in recs.items()
+        # 每个直播间可以有多段录像（实测时断流重连会分段）；旧格式是单个对象
+        self.recordings: Dict[str, List[Recording]] = {
+            rid: [Recording(rid, self.dir / r["path"], r["start_ts"], r["duration"])
+                  for r in (v if isinstance(v, list) else [v])]
+            for rid, v in recs.items()
         }
 
     def _room_stream(self, room_id: str) -> Iterator[RawMessage]:
@@ -50,8 +53,12 @@ class ReplaySource:
         streams = [self._room_stream(r.room_id) for r in self.rooms]
         return heapq.merge(*streams, key=lambda m: (m.recv_ts, m.room_id))
 
-    def recording(self, room_id: str) -> Optional[Recording]:
-        return self.recordings.get(room_id)
+    def recording(self, room_id: str, t: Optional[float] = None) -> Optional[Recording]:
+        """返回覆盖时刻 t 的那段录像；t 为空时返回第一段；这一刻没有录像返回 None。"""
+        segs = self.recordings.get(room_id) or []
+        if t is None:
+            return segs[0] if segs else None
+        return next((r for r in segs if r.start_ts <= t < r.start_ts + r.duration), None)
 
 
 class LiveSource:

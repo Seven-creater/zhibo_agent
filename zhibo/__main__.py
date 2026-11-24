@@ -4,6 +4,7 @@
   python3 -m zhibo make-data [--force]       # 只生成合成数据集
   python3 -m zhibo run --config configs/demo.json [--set judge.kind=mock ...]
   python3 -m zhibo eval --run runs/system    # 只重算指标和报告
+  python3 -m zhibo collect --room 陈泽=<直播间号> --start-hub   # 实测采集
 """
 from __future__ import annotations
 
@@ -74,6 +75,12 @@ def cmd_demo(args) -> None:
     print(f"对照表：{out}\n本系统报告：runs/system/report.md\n切片：runs/system/clips/")
 
 
+def cmd_collect(args) -> None:
+    from .collect import cmd_collect as run_collect
+
+    run_collect(args, load_config(Path(args.config)))
+
+
 def main(argv=None) -> None:
     ap = argparse.ArgumentParser(prog="zhibo", description="抖音直播高光切片 Agent（离线回放 demo）")
     sub = ap.add_subparsers(dest="cmd", required=True)
@@ -90,6 +97,14 @@ def main(argv=None) -> None:
     p.add_argument("--out")
     p.add_argument("--set", action="append", help="覆盖配置，如 --set scheduler.record_budget=3")
     p.set_defaults(fn=cmd_run)
+    p = sub.add_parser("collect", help="实测采集：dyhub 采弹幕 + ffmpeg 录制，落成数据集")
+    p.add_argument("--room", action="append", required=True, help="名字=直播间号或链接，可写多次")
+    p.add_argument("--hours", type=float, default=4.0)
+    p.add_argument("--out", help="输出目录，默认 data/live_<日期_时间>")
+    p.add_argument("--port", type=int, default=8757)
+    p.add_argument("--start-hub", action="store_true", help="dyhub 没在运行时顺带启动")
+    p.add_argument("--config", default="configs/live.json")
+    p.set_defaults(fn=cmd_collect)
     p = sub.add_parser("eval")
     p.add_argument("--run", required=True)
     p.add_argument("--data", default="data/demo")

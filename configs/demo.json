@@ -1,10 +1,14 @@
 {
   "run_name": "system",
   "signals": {
-    "laugh_words": ["哈哈", "笑死", "绷不住", "卧槽", "？？", "??", "名场面", "离谱", "太强了"]
+    "laugh_words": [
+      "哈哈", "笑死", "笑不活", "笑麻", "笑疯", "绷不住", "蚌埠住", "xswl", "草草", "卧槽", "？？", "??", "名场面", "离谱", "太强了",
+      "下饭", "白给", "人机", "菜死", "这都能", "整活", "抽象",
+      "[笑哭]", "[捂脸]", "[呲牙]", "[大笑]", "[奸笑]", "🤣", "😂"
+    ]
   },
   "heat": {
-    "channels": ["chat_users", "likes", "gift"],
+    "channels": ["chat_users", "laugh_users", "likes", "gift"],
     "rolling_seconds": 5,
     "warmup_seconds": 90,
     "ewma_alpha": 0.01,
@@ -14,7 +18,7 @@
     "exit_seconds": 8,
     "max_seconds": 240,
     "baseline_update_max_z": 2.0,
-    "std_floor": {"chat_users": 1.0, "likes": 0.5, "gift": 0.8}
+    "std_floor": {"chat_users": 1.0, "laugh_users": 1.0, "likes": 0.5, "gift": 0.8}
   },
   "attribution": {
     "enabled": true,
