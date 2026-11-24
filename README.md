@@ -86,7 +86,20 @@ scripts/fetch_models.sh
 python3 -m zhibo run --config configs/fused.json --data data/live_<日期_时间>
 ```
 
-每路信号变成 0～1 的激活度（弹幕和音量看相对本直播间基线的 z 值，笑声等看分类概率），保持最近 10 秒的最大值，按权重相加；几路同时亮加分，整场常亮的降权。声音比弹幕早，先往后挪 5 秒再对齐。参数在配置的 `fuse` 一节，都是起步值，要用真实数据调。`configs/live.json` 仍然只用弹幕（`heat.kind = chat_z`），实时采集还没接声音（第 4 阶段）。
+每路信号变成 0～1 的激活度（弹幕和音量看相对本直播间基线的 z 值，笑声等看分类概率），保持最近 10 秒的最大值，按权重相加；几路同时亮加分，整场常亮的降权。声音比弹幕早，先往后挪 5 秒再对齐。参数在配置的 `fuse` 一节，都是起步值，要用真实数据调。`configs/live.json` 本身仍然只用弹幕（`heat.kind = chat_z`）。
+
+### 实时采集接声音（重构第 4 阶段）
+
+用项目 `.venv` 的 Python 运行采集，就会自动启用弹幕 + 声音融合检测：
+
+```bash
+.venv/bin/python -m zhibo collect --start-hub --hours 5 --room 吕德华=<主页链接> ...
+```
+
+- 录原画的同一个 ffmpeg 再多输出一路 16 kHz 单声道 PCM，交给一个感知线程逐秒处理。各直播间共用一份模型，约 600 MB 内存。
+- 感知线程处理不过来时直接丢掉那一秒并计数（每分钟日志里有"积压、丢弃"），绝不卡住画面录制。
+- 每秒感知和逐句稿实时写进数据集的 `perception/`、`transcript/`，事后用 `configs/fused.json` 离线回放，能重现实时的检测。
+- `--detector chat` 强制只看弹幕；用系统 `python3`（没有 sherpa-onnx）运行时，会自动退回只看弹幕。
 
 ## 代码结构
 

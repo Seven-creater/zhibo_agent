@@ -11,6 +11,7 @@
 """
 from __future__ import annotations
 
+import copy
 import hashlib
 import json
 import queue
@@ -19,9 +20,9 @@ import secrets
 import signal
 import threading
 import time
-from collections import Counter, defaultdict
+from collections import Counter, defaultdict, deque
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Deque, Dict, List, Optional
 
 from .detect.attribution import CAUSE_ZH, attribute
 from .core.models import RawMessage, Room
@@ -62,6 +63,18 @@ class Collector:
         self.methods: Dict[str, Counter] = defaultdict(Counter)
         self.online: Dict[str, int] = {}
         self.recorders: Dict[str, Recorder] = {}
+        # 融合检测要实时声音：录制进程多出一路 PCM，交给单独的感知线程（perceive/listener.py）
+        self.fused = cfg["heat"].get("kind", "chat_z") == "fused"
+        self.lead = float(cfg.get("fuse", {}).get("audio_lead_seconds", 0))
+        self.aq: "queue.Queue" = queue.Queue()  # 感知线程 → 检测线程：(直播间, 一秒声音感知)
+        self.sentences: Dict[str, Deque[Dict[str, Any]]] = defaultdict(lambda: deque(maxlen=3000))
+        self.listener = None
+        if self.fused:
+            from .perceive.listener import LiveListener  # 要项目 .venv 的 numpy、sherpa-onnx
+
+            self.listener = LiveListener(cfg, out, self.stop, self.log,
+                                         on_row=lambda rid, row: self.aq.put((rid, row)),
+                                         on_sentence=lambda rid, s: self.sentences[rid].append(s))
         for r in rooms:
             if r["room_id"]:
                 self._add_room(r)
@@ -72,7 +85,8 @@ class Collector:
         self.status[rid] = "waiting"
         self.recorders[rid] = Recorder(self.hub, rid, self.out / "recordings" / rid, self.stop, self.log,
                                        sec_uid=r.get("sec_uid"), quality=self.quality, min_free_gb=self.min_free_gb,
-                                       keep_seconds=self.keep_seconds)
+                                       keep_seconds=self.keep_seconds,
+                                       pcm_sink=self.listener.sink if self.listener else None)
         self.rooms[rid] = r
         if self.started:
             self.recorders[rid].start()
@@ -139,6 +153,7 @@ class Collector:
         """实时检测：和离线回放用同一套信号聚合、热度检测、归因代码（需求 8.3 节）。"""
         engines: Dict[str, RoomEngine] = {}
         cur: Dict[str, int] = {}
+        early: Dict[str, List[Dict[str, Any]]] = defaultdict(list)  # 引擎建好之前就到的声音
 
         def tick(rid: str, t: int) -> None:
             st = engines[rid].step(float(t))
@@ -156,10 +171,21 @@ class Collector:
             if rid is not None:
                 if rid not in engines:
                     engines[rid], cur[rid] = RoomEngine(rid, self.cfg), int(msg.recv_ts)
+                    for row in early.pop(rid, []):
+                        engines[rid].feed_audio(row)
                 while cur[rid] < int(msg.recv_ts):
                     tick(rid, cur[rid])
                     cur[rid] += 1
                 engines[rid].feed(msg)
+            while True:  # 声音感知：领先弹幕 lead 秒，引擎按 t − lead 取用，一般早就到了
+                try:
+                    arid, row = self.aq.get_nowait()
+                except queue.Empty:
+                    break
+                if arid in engines:
+                    engines[arid].feed_audio(row)
+                else:
+                    early[arid].append(row)
             now = int(time.time())
             for r in list(cur):
                 while cur[r] < now - 2:  # 留 2 秒给晚到的消息
@@ -174,6 +200,10 @@ class Collector:
         info = self.rooms[ev.room_id]
         room = Room(ev.room_id, info["anchor"], "搞笑", "manual", self.first_ts.get(ev.room_id, ev.start),
                     stream_start_known=False, sec_uid=info.get("sec_uid"))
+        if self.fused:  # 异常期间（换算回声音时间）主播说的话，给归因看关键词；和离线回放 pipeline.py 一致
+            a0, a1 = ev.start - self.lead - 30, ev.end - self.lead
+            ev.stats["transcript"] = " / ".join(x["text"] for x in list(self.sentences[ev.room_id])
+                                                 if a0 <= x["start"] <= a1)[:400]
         attr = attribute(ev, room, self.cfg)
         self.anomalies += 1
         hhmm = time.strftime("%H:%M:%S", time.localtime(ev.start))
@@ -226,11 +256,17 @@ class Collector:
                 parts.append(f"{r['anchor']}：在线 {self.online.get(rid, '-')}，弹幕 {c['chat']}/分，"
                              f"笑点 {c['laugh']}/分，录像占用 {size:.0f} MB，{self.status[rid]}")
             parts += [f"{r['anchor']}：等待开播" for r in list(self.pending)]
+            if self.listener:
+                st = self.listener.stats()
+                parts.append(f"声音感知：已处理 {sum(st['done'].values())} 秒、积压 {st['backlog_seconds']} 秒、"
+                             f"丢弃 {sum(st['dropped'].values())} 秒、累计用时 {st['work_seconds']} 秒")
             self.log("[每分钟] " + "；".join(parts) + f"｜累计异常 {self.anomalies}，触发保留 {len(self.triggers)}")
 
     def run(self, hours: float, laugh_words: List[str]) -> None:
         self.hub.ensure_account()
         self.started = True
+        if self.listener:
+            self.listener.start()
         for rec in list(self.recorders.values()):
             rec.start()
         threading.Thread(target=self._resolve_pending, daemon=True).start()
@@ -243,7 +279,8 @@ class Collector:
         mode = ("全程录制" if self.keep_seconds is None else
                 f"环形缓冲（只保留最近 {self.keep_seconds / 60:.1f} 分钟；确认搞笑异常结束后往回存 {self.policy.replay / 60:.0f} 分钟）")
         self.log(f"开始采集：{len(self.rooms)} 个直播间，另有 {len(self.pending)} 位主播等待开播；"
-                 f"最长 {hours} 小时，Ctrl+C 结束。录制方式：{mode}。输出：{self.out}")
+                 f"最长 {hours} 小时，Ctrl+C 结束。录制方式：{mode}。"
+                 f"检测：{'弹幕 + 声音融合（实时声音感知）' if self.fused else '只看弹幕'}。输出：{self.out}")
         try:
             for ev in self.hub.events(self.stop):
                 rid = ev.get("roomId")
@@ -274,6 +311,8 @@ class Collector:
             self.stop.set()
             for rec in self.recorders.values():
                 rec.join(30)
+            if self.listener:
+                self.listener.join(60)  # 把排队的声音处理完、文件关好
             detector.join(30)
             for f in self.files.values():
                 f.close()
@@ -311,11 +350,40 @@ class Collector:
         audio_mb = sum((self.out / e["path"]).stat().st_size for r in self.recorders.values() for e in r.audio_entries) / 1e6
         self.log(f"[收尾] 异常 {self.anomalies} 次，触发保留 {len(self.triggers)} 次；保留录像 {kept / 60:.1f} 分钟、{size:.0f} MB，"
                  f"缓冲中丢弃 {deleted:.0f} MB；整场音频 {audio_min:.1f} 分钟、{audio_mb:.0f} MB")
+        if self.listener:
+            st = self.listener.stats()
+            lag = {self.rooms[rid]["anchor"]: self.recorders[rid].pcm_lag for rid in recs}
+            self.log(f"[收尾] 声音感知：处理 {sum(st['done'].values())} 秒、丢弃 {sum(st['dropped'].values())} 秒、"
+                     f"用时 {st['work_seconds']} 秒；PCM 和画面开头的时间差（秒）{lag}")
         self.log(f"[收尾] 数据集已整理：{self.out}（录像 {sum(len(s) for s in recs.values())} 段）。"
                  f"下一步：python3 -m zhibo run --config configs/live.json --data {self.out}")
 
 
+def _choose_detector(want: str, cfg: Dict[str, Any]) -> Dict[str, Any]:
+    """--detector：fused 要 numpy、sherpa-onnx 和模型文件都在；auto 时缺了就退回只看弹幕。"""
+    cfg = copy.deepcopy(cfg)
+    if want == "chat":
+        cfg["heat"]["kind"] = "chat_z"
+        return cfg
+    models = Path(cfg.get("perceive", {}).get("models_dir", "models"))
+    try:
+        import numpy  # noqa: F401
+        import sherpa_onnx  # noqa: F401
+        ok, why = models.is_dir(), f"找不到模型目录 {models}（先运行 scripts/fetch_models.sh）"
+    except ImportError as e:
+        ok, why = False, f"缺少 {e.name}（用项目 .venv/bin/python 运行）"
+    if ok:
+        cfg["heat"]["kind"] = "fused"
+    elif want == "fused":
+        raise SystemExit(f"--detector fused 用不了：{why}")
+    else:
+        print(f"声音感知用不了，只看弹幕：{why}", flush=True)
+        cfg["heat"]["kind"] = "chat_z"
+    return cfg
+
+
 def cmd_collect(args, cfg: Dict[str, Any]) -> None:
+    cfg = _choose_detector(getattr(args, "detector", "auto"), cfg)
     rooms = [parse_room(a) for a in args.room]
     out = Path(args.out or time.strftime("data/live_%Y%m%d_%H%M"))
     out.mkdir(parents=True, exist_ok=True)

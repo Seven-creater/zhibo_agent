@@ -8,6 +8,7 @@
 """
 from __future__ import annotations
 
+import copy
 from pathlib import Path
 from typing import Any, Dict, List
 
@@ -40,6 +41,12 @@ class SoundTagger:
         self.min_db = float(cfg.get("tag_min_db", -50))
         self.label_group = {name: g for g, names in GROUPS.items() for name in names}
         self.reset()
+
+    def clone(self) -> "SoundTagger":
+        """给另一路样本流用的新实例：共用已加载的分类模型，缓冲各自独立。"""
+        c = copy.copy(self)
+        c.reset()
+        return c
 
     def reset(self) -> None:
         """换一路新的样本流：缓冲和秒数清零，模型不重新加载。"""

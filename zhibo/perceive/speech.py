@@ -11,6 +11,7 @@ VAD 每次吃一个窗口（512 个样本），一句话结束就取出整句送
 """
 from __future__ import annotations
 
+import copy
 from pathlib import Path
 from typing import Any, Dict, List
 
@@ -40,6 +41,13 @@ class SpeechTranscriber:
         self.window = vc.silero_vad.window_size
         self._vc, self._mk_vad = vc, sherpa_onnx.VoiceActivityDetector
         self.reset()
+
+    def clone(self) -> "SpeechTranscriber":
+        """给另一路样本流用的新实例：共用已加载的识别模型，VAD 和计数各自独立。
+        同一时刻只能有一个线程调用识别模型（实时采集时由单个感知线程轮流处理各直播间）。"""
+        c = copy.copy(self)
+        c.reset()
+        return c
 
     def reset(self) -> None:
         """换一路新的样本流（例如断流后的新一段录制）：VAD 状态和计数清零，模型不重新加载。"""

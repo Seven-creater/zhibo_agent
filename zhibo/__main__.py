@@ -118,6 +118,9 @@ def main(argv=None) -> None:
                         "HD1 超清，SD2 高清 720p 约 1 GB/时，SD1 标清")
     p.add_argument("--min-free-gb", type=float, default=15.0, help="磁盘剩余低于这个值就停止录制")
     p.add_argument("--full-record", action="store_true", help="全程录制（默认是环形缓冲，只保留触发的片段）")
+    p.add_argument("--detector", default="auto", choices=["auto", "chat", "fused"],
+                   help="检测方式：fused 弹幕 + 实时声音融合（要项目 .venv 和 models/）；chat 只看弹幕；"
+                        "auto（默认）能用声音就用 fused，否则 chat")
     p.add_argument("--config", default="configs/live.json")
     p.set_defaults(fn=cmd_collect)
     p = sub.add_parser("perceive", help="给数据集补算声音感知：每秒音量、笑声等和逐句稿（要项目 .venv）")

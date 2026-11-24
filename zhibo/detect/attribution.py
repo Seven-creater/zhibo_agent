@@ -76,6 +76,15 @@ def attribute(ev: HeatEvent, room: Room, cfg: Dict[str, Any]) -> Attribution:
     if ap:
         said = s.get("transcript") or ""
         laugh = ap.get("laugh") or {}
+        acts = s.get("act_peaks") or {}
+        on = float(cfg.get("fuse", {}).get("on", 0.3))
+        viewers = max(acts.get("chat_users", 0), acts.get("laugh_users", 0)) >= on
+        if laugh.get("value", 0) >= float(a.get("audio_laugh_min", 0.4)) and not viewers:
+            # 只有声音里有笑、观众毫无反应：多半是游戏或视频里角色的笑声（实时测试 16:47:59：剧情游戏，笑声概率 0.97，0 人发弹幕）
+            ev_lines.append(f"声音里有笑声（概率 {laugh['value']:.2f}），但弹幕没有放量，可能是游戏或视频里的笑声")
+            if said:
+                ev_lines.append(f"主播在说：{said[:40]}")
+            return Attribution(ev.event_id, "unknown", 0.4, ev_lines)
         if laugh.get("value", 0) >= float(a.get("audio_laugh_min", 0.4)):
             ev_lines.append(f"主播这边有笑声（声音分类概率 {laugh['value']:.2f}，+{laugh['t'] - room.start_ts:.0f}s）")
             if said:

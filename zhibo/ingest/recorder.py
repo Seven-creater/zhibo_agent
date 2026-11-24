@@ -6,7 +6,7 @@ import subprocess
 import threading
 import time
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Callable, Dict, List, Optional
 
 from ..core import media
 from .douyin import _env_no_proxy, quality_stream_url
@@ -24,13 +24,18 @@ class Recorder(threading.Thread):
     同一个 ffmpeg 还顺带把**整场音频**原样存成 audio.ts（不重新编码，mpegts 封装带时间戳，时长准确；约 0.1 GB/时），
     不管环形缓冲删没删画面，声音都全程保留，给声音分析和离线实验用。音频和画面来自同一路输入，
     时间天然对齐。结束时整理成 audio_<开始毫秒>.ts，条目在 audio_entries 里（写进 audio.json）。
+
+    给了 pcm_sink 时，同一个 ffmpeg 再多一路输出：16 kHz 单声道 PCM 写到标准输出，由读取线程每凑满 1 秒交给
+    pcm_sink(room_id, 本段开始时刻, 字节)，本段结束时交一次 pcm_sink(room_id, 本段开始时刻, None)。
+    读取线程**只读不等**：pcm_sink 必须立即返回（处理不过来就丢，见 collect.py），否则管道写满，ffmpeg 会卡住，画面录制也跟着停。
     """
 
     SEG_SECONDS = 10
 
     def __init__(self, hub: Hub, room_id: str, out_dir: Path, stop: threading.Event, log,
                  sec_uid: Optional[str] = None, quality: str = "ORIGIN", min_free_gb: float = 15.0,
-                 keep_seconds: Optional[float] = None):
+                 keep_seconds: Optional[float] = None,
+                 pcm_sink: Optional[Callable[[str, float, Optional[bytes]], None]] = None):
         super().__init__(daemon=True)
         self.hub, self.room_id, self.dir, self.stop, self.log = hub, room_id, out_dir, stop, log
         self.sec_uid, self.quality, self.min_free_gb = sec_uid, quality, min_free_gb
@@ -46,6 +51,8 @@ class Recorder(threading.Thread):
         self.with_audio = True  # 流里没有音频时自动关掉，免得 ffmpeg 因为音频输出为空而整个失败
         self.sessions: List[Dict[str, Any]] = []  # {dir, start}，给整理音频用
         self.audio_entries: List[Dict[str, Any]] = []
+        self.pcm_sink = pcm_sink
+        self.pcm_lag: List[float] = []  # 每段 PCM 第一秒到达时刻和画面第一个小段落盘时刻之差（时钟对齐，Q-6）
 
     def pin(self, start: float, end: float = float("inf")) -> int:
         """标记一段要保留，返回编号；end 不给就是"先占住、还没定终点"。"""
@@ -97,6 +104,29 @@ class Recorder(threading.Thread):
             self.segments.append({"path": sess / parts[0], "start": start + float(parts[1]),
                                   "end": start + float(parts[2]), "deleted": False})
 
+    def _read_pcm(self, proc: subprocess.Popen, info: Dict[str, Any]) -> None:
+        """读 ffmpeg 标准输出的 PCM，每 1 秒（32000 字节）交给 pcm_sink。只读不等，出错也继续读空管道。"""
+        sec_bytes = 16000 * 2
+        buf = b""
+        while True:
+            chunk = proc.stdout.read(4096)
+            if not chunk:
+                break
+            buf += chunk
+            while len(buf) >= sec_bytes:
+                one, buf = buf[:sec_bytes], buf[sec_bytes:]
+                if "start" not in info:
+                    info["start"] = time.time() - 1.0  # 第一秒凑满时，这一秒的开头大约在 1 秒前
+                try:
+                    self.pcm_sink(self.room_id, info["start"], one)
+                except Exception as e:  # noqa: BLE001  感知出错不能拖垮录制
+                    self.log(f"[感知] {self.room_id} 交付声音出错：{e}")
+        if "start" in info:
+            try:
+                self.pcm_sink(self.room_id, info["start"], None)
+            except Exception:  # noqa: BLE001
+                pass
+
     def _expire(self, now: float) -> None:
         if self.keep_seconds is None:
             return
@@ -129,9 +159,17 @@ class Recorder(threading.Thread):
                  "-i", url, "-c", "copy", "-f", "segment", "-segment_time", str(self.SEG_SECONDS),
                  "-segment_format", "mpegts", "-reset_timestamps", "1",
                  "-segment_list", str(sess / "list.csv"), "-segment_list_type", "csv", str(sess / "seg_%05d.ts")]
-                + (["-map", "0:a:0", "-c", "copy", "-f", "mpegts", str(sess / "audio.ts")] if self.with_audio else []),
-                env=_env_no_proxy(), stdout=subprocess.DEVNULL, stderr=subprocess.PIPE,
+                + (["-map", "0:a:0", "-c", "copy", "-f", "mpegts", str(sess / "audio.ts")] if self.with_audio else [])
+                + (["-map", "0:a:0", "-ac", "1", "-ar", "16000", "-f", "s16le", "pipe:1"]
+                   if self.with_audio and self.pcm_sink else []),
+                env=_env_no_proxy(), stdout=subprocess.PIPE if self.with_audio and self.pcm_sink else subprocess.DEVNULL,
+                stderr=subprocess.PIPE,
             )
+            pcm_info: Dict[str, Any] = {}
+            reader = None
+            if self.with_audio and self.pcm_sink:
+                reader = threading.Thread(target=self._read_pcm, args=(self.proc, pcm_info), daemon=True)
+                reader.start()
             first = sess / "seg_00000.ts"
             start = None
             known: set = set()
@@ -140,6 +178,8 @@ class Recorder(threading.Thread):
                 if start is None and first.exists() and first.stat().st_size > 0:
                     start = time.time()  # 第一个字节落盘的时刻 ≈ 本段录制第 0 秒（误差待实测，Q-6）
                     self.sessions.append({"dir": sess, "start": start})
+                    if "start" in pcm_info:
+                        self.pcm_lag.append(round(pcm_info["start"] - start, 2))
                 if start is not None and time.time() - last_check > 5:
                     last_check = time.time()
                     self._scan(sess, start, known)
@@ -153,6 +193,8 @@ class Recorder(threading.Thread):
                     self.proc.wait(10)
                 except subprocess.TimeoutExpired:
                     self.proc.kill()
+            if reader is not None:
+                reader.join(5)
             err = (self.proc.stderr.read() or b"").decode("utf-8", "replace")[-300:]
             if self.with_audio and "audio.ts" in err and ("does not contain any stream" in err or "matches no streams" in err):
                 self.with_audio = False
