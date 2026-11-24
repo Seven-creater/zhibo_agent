@@ -13,7 +13,7 @@ import math
 from collections import Counter, deque
 from typing import Any, Deque, Dict, List, Optional, Tuple
 
-from .models import HeatEvent, SignalPoint
+from ..core.models import HeatEvent, SignalPoint
 
 CHANNEL_VALUE = {
     "chat_users": lambda pts: float(sum(p.chat_users for p in pts)),

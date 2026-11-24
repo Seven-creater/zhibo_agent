@@ -62,46 +62,49 @@ python3 -m zhibo run --config configs/live_glm.json --data data/live_<日期_时
 
 先按"异常前 45 秒到结束后 10 秒"截宽窗口，按说话停顿切成编号小段，每段给 GLM 一张截图和这段的弹幕；GLM 只回答铺垫、高潮、反应分别是哪几段，最终切点取这些段的边界（模型不报时间戳）。所有请求先记账再发出，重跑时直接回放，不重复花钱。
 
-## 数据流
+## 代码结构
+
+重构进行中（方案见 [docs/重构方案_声音主导.md](docs/重构方案_声音主导.md)）。第 1 阶段只搬了结构、没改行为。
 
 ```
-ReplaySource（消息流 + 录像）                       sources.py
+zhibo/
+  engine.py        每秒引擎 RoomEngine：实时采集和离线回放共用（聚合 → 检测 → 报告异常开始/结束）
+  pipeline.py      离线回放：引擎 → 归因 → 调度/录制覆盖 → 回溯 → 判定 → 出片 → 评测
+  collect.py       实时采集：dyhub 弹幕 + 录制 + 引擎 + 即时重放
+  core/            models 数据结构 · config 配置 · ledger 模型请求账本 · media FFmpeg 工具
+  ingest/          douyin 抖音接口 · hub dyhub 客户端 · recorder 录制（环形缓冲 + 整场音频） · sources 回放数据源
+  perceive/        chat 弹幕信号（以后加 audio、speech、tagger、scene）
+  detect/          episode 异常开始/结束 · attribution 归因
+  act/             replay 即时重放保留策略 · scheduler 录制路数调度
+  edit/            backtrack 回溯找边界 · judge 判定器 · render 出片
+  evaluate/        evaluate 指标 · report 报告 · demo_data 合成数据
+```
+
+## 数据流（离线回放）
+
+```
+ReplaySource（消息流 + 录像）                       ingest/sources.py
    │ 按秒推进的回放时钟
    ▼
-SignalAggregator：按秒聚合、礼物去重计价             signals.py     M2
-   ▼
-HeatDetector：每间自己的基线，z 值进出阈值           heat.py        M5
+RoomEngine：每秒聚合 → 热度检测                      engine.py
+   ├ SignalAggregator：按秒聚合、礼物去重计价          perceive/chat.py   M2
+   └ HeatDetector：每间自己的基线，z 值进出阈值        detect/episode.py  M5
    ▼ 异常结束时
-attribute：福袋/PK/开播/单人刷礼物/刷屏/内容          attribution.py M5
+attribute：福袋/PK/开播/单人刷礼物/刷屏/内容          detect/attribution.py M5
    ▼ 只有"内容驱动"往下走
-Scheduler.covered：这段有没有录到（环形缓冲）         scheduler.py   M4 M3
+Scheduler.covered：这段有没有录到（环形缓冲）         act/scheduler.py   M4 M3
    ▼
-backtrack.plan：信号滞后回推 + 吸附静音边界 + 时长    backtrack.py   M6
+backtrack.plan：信号滞后回推 + 吸附静音边界 + 时长    edit/backtrack.py  M6
    ▼
-judge_candidate：证据包 → 判定器 → 格式校验/修订      judge.py       M7
-   └─ Ledger：先记账再发出，已收到的直接回放           ledger.py      M11
+judge_candidate：证据包 → 判定器 → 格式校验/修订      edit/judge.py      M7
+   └─ Ledger：先记账再发出，已收到的直接回放           core/ledger.py     M11
    ▼
-render_clip：裁切 + 自检                             render.py      M8
+render_clip：裁切 + 自检                             edit/render.py     M8
    ▼
-evaluate + report：指标、逐条对照、基线对照           evaluate.py report.py  M9
+evaluate + report：指标、逐条对照、基线对照           evaluate/          M9
 ```
 
-主循环在 `pipeline.py`。调度器每 15 秒按"log(在线人数) × (1 + 0.4 × 平滑热度)"重新分配录制路数。
-
-## 各模块现状和替换方向
-
-| 文件 | 现在 | 以后换成 |
-|---|---|---|
-| `sources.py` | 读冻结数据集 | `LiveSource`：dyhub 或 DouyinBarrage 适配层，DouyinLiveRecorder 录制加环形缓冲 |
-| `signals.py` | 弹幕人数、笑点词、礼物去重、点赞、进场、在线 | 加弹幕去刷屏、语义特征（可移植 douyin-living） |
-| `heat.py` | EWMA 基线 + z 值，三路信号取最大 | river 在线检测、多形态（加速、多路共振） |
-| `attribution.py` | 规则 | 规则 + GLM 辅助归因 |
-| `scheduler.py` | 只调度录制路数 | 账号、浏览器页、带宽、GLM 并发全部预算；开播规律；探索比例 |
-| `backtrack.py` | 只有静音边界 | 语音转写句子边界（faster-whisper/FunASR）、镜头切换（PySceneDetect） |
-| `judge.py` | `MockJudge` 按规则模拟 | `GLMJudge`：接 agentic-video 的 opencode_provider |
-| `ledger.py` | 简版账本 | agentic-video 的 state.py |
-| `render.py` | 裁切 + 时长/音视频轨自检 | 字幕、竖屏、封面 |
-| `evaluate.py` | 第 1.4 节大部分指标 | 片段自洽率（人工）、按品类分组、留出集 |
+实时采集走同一个 `RoomEngine`，之后由 `act/replay.py` 决定先占住、保留还是释放录像。调度器每 15 秒按"log(在线人数) × (1 + 0.4 × 平滑热度)"重新分配录制路数。
 
 ## 数据集格式
 

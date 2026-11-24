@@ -5,8 +5,8 @@ import json
 from pathlib import Path
 from typing import Any, Dict, List
 
-from .attribution import CAUSE_ZH
-from .models import read_jsonl
+from ..detect.attribution import CAUSE_ZH
+from ..core.models import read_jsonl
 
 METRIC_ROWS = [
     ("recall", "高光检出率", "pct"),

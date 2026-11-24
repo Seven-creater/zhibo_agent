@@ -7,7 +7,7 @@ from __future__ import annotations
 
 from typing import Any, Dict
 
-from .models import Attribution, HeatEvent, Room
+from ..core.models import Attribution, HeatEvent, Room
 
 CAUSE_ZH = {
     "content": "内容驱动",

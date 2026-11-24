@@ -15,18 +15,19 @@ from dataclasses import asdict
 from pathlib import Path
 from typing import Any, Dict, List
 
-from . import backtrack, media
-from .attribution import attribute
-from .evaluate import evaluate
-from .heat import HeatDetector
-from .judge import OUTPUT_SPEC, judge_candidate, make_judge
-from .ledger import Ledger
-from .models import Attribution, Candidate, HeatEvent, write_jsonl
-from .render import render_clip
-from .report import write_report
-from .scheduler import Scheduler
-from .signals import SignalAggregator
-from .sources import ReplaySource
+from .edit import backtrack
+
+from .core import media
+from .detect.attribution import attribute
+from .evaluate.evaluate import evaluate
+from .edit.judge import OUTPUT_SPEC, judge_candidate, make_judge
+from .core.ledger import Ledger
+from .core.models import Attribution, Candidate, HeatEvent, write_jsonl
+from .edit.render import render_clip
+from .evaluate.report import write_report
+from .act.scheduler import Scheduler
+from .engine import RoomEngine
+from .ingest.sources import ReplaySource
 
 
 def _overlap(a0: float, a1: float, b0: float, b1: float) -> float:
@@ -43,8 +44,7 @@ def run_pipeline(cfg: Dict[str, Any], dataset_dir: Path, out_dir: Path) -> Dict[
 
     src = ReplaySource(dataset_dir)
     rooms = {r.room_id: r for r in src.rooms}
-    aggs = {rid: SignalAggregator(rid, cfg) for rid in rooms}
-    dets = {rid: HeatDetector(rid, cfg) for rid in rooms}
+    engines = {rid: RoomEngine(rid, cfg) for rid in rooms}
     sched = Scheduler(rooms, cfg)
     b0 = cfg["backtrack"]
     judge = make_judge(cfg["judge"])
@@ -196,12 +196,11 @@ def run_pipeline(cfg: Dict[str, Any], dataset_dir: Path, out_dir: Path) -> Dict[
         for rid in sorted(rooms):
             if not rooms[rid].is_live(t):
                 continue
-            pt = aggs[rid].close(t)
-            signals.append(pt.to_row())
-            _, ev = dets[rid].update(pt)
-            sched.observe(rid, t, pt.online, dets[rid].z_smooth)
-            if ev:
-                handle(ev, t)
+            st = engines[rid].step(t)
+            signals.append(st.point.to_row())
+            sched.observe(rid, t, st.point.online, engines[rid].z_smooth)
+            if st.event:
+                handle(st.event, t)
         sched.tick(t)
 
     cur = None
@@ -212,7 +211,7 @@ def run_pipeline(cfg: Dict[str, Any], dataset_dir: Path, out_dir: Path) -> Dict[
         while cur < sec:
             process_second(cur)
             cur += 1
-        aggs[msg.room_id].feed(msg)
+        engines[msg.room_id].feed(msg)
         if msg.type == "chat":
             room_chats[msg.room_id].append((msg.recv_ts, msg.payload.get("text", "")))
     end_t = max((r.end_ts or cur + 1) for r in rooms.values())
@@ -220,7 +219,7 @@ def run_pipeline(cfg: Dict[str, Any], dataset_dir: Path, out_dir: Path) -> Dict[
         process_second(cur)
         cur += 1
     for rid in sorted(rooms):
-        ev = dets[rid].flush(end_t)
+        ev = engines[rid].flush(end_t)
         if ev:
             handle(ev, end_t)
     sched.finalize(end_t)

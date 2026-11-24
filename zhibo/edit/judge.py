@@ -17,8 +17,8 @@ import urllib.request
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
-from .attribution import CAUSE_ZH
-from .ledger import Ledger
+from ..detect.attribution import CAUSE_ZH
+from ..core.ledger import Ledger
 
 OUTPUT_SPEC = {
     "event": "一句话说发生了什么",

@@ -4,9 +4,9 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any, Dict
 
-from . import media
-from .models import Candidate
-from .sources import Recording
+from ..core import media
+from ..core.models import Candidate
+from ..ingest.sources import Recording
 
 
 def render_clip(cand: Candidate, rec: Recording, out_dir: Path, cfg: Dict[str, Any]) -> Dict[str, Any]:

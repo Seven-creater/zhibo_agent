@@ -5,7 +5,7 @@ import re
 from collections import Counter
 from typing import Any, Dict, Optional, Tuple
 
-from .models import RawMessage, SignalPoint
+from ..core.models import RawMessage, SignalPoint
 
 SPECIAL_TYPES = {"lucky_bag", "red_packet", "pk"}
 _STRIP = re.compile(r"\[[^\[\]]{1,8}\]|（单击可串）|\(单击可串\)|[\s\W_]", re.UNICODE)

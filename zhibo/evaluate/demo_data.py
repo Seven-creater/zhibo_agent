@@ -19,7 +19,7 @@ import wave
 from pathlib import Path
 from typing import Any, Dict, List
 
-from .media import ffmpeg
+from ..core.media import ffmpeg
 
 BASE_TS = 1795478400.0  # 回放时钟的起点（任意固定值，保证可复现）
 DURATION = 1200

@@ -12,7 +12,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Dict, Iterator, List, Optional
 
-from .models import RawMessage, Room
+from ..core.models import RawMessage, Room
 
 
 @dataclass

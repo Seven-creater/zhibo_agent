@@ -14,7 +14,7 @@ import shutil
 import sys
 from pathlib import Path
 
-from .config import load_config
+from .core.config import load_config
 
 
 def _print_metrics(m) -> None:
@@ -24,7 +24,7 @@ def _print_metrics(m) -> None:
 
 
 def cmd_make_data(args) -> None:
-    from .demo_data import make_demo_dataset
+    from .evaluate.demo_data import make_demo_dataset
 
     out = Path(args.data)
     if out.exists() and not args.force:
@@ -47,8 +47,8 @@ def cmd_run(args) -> None:
 
 
 def cmd_eval(args) -> None:
-    from .evaluate import evaluate
-    from .report import write_report
+    from .evaluate.evaluate import evaluate
+    from .evaluate.report import write_report
 
     run = Path(args.run)
     cfg = json.loads((run / "config.json").read_text(encoding="utf-8"))
@@ -59,7 +59,7 @@ def cmd_eval(args) -> None:
 
 def cmd_demo(args) -> None:
     from .pipeline import run_pipeline
-    from .report import write_summary
+    from .evaluate.report import write_summary
 
     data = Path(args.data)
     if not data.exists():

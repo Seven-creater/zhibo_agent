@@ -5,7 +5,7 @@ import json
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
-from .models import read_jsonl
+from ..core.models import read_jsonl
 
 
 def _ov(a0: float, a1: float, b0: float, b1: float) -> float:

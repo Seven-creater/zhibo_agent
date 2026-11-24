@@ -13,30 +13,24 @@ from __future__ import annotations
 
 import hashlib
 import json
-import os
 import queue
 import re
 import secrets
-import shutil
 import signal
-import subprocess
 import threading
 import time
-import urllib.error
-import urllib.request
 from collections import Counter, defaultdict
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
-from . import media
-from .attribution import CAUSE_ZH, attribute
-from .heat import HeatDetector
-from .models import RawMessage, Room
-from .signals import SignalAggregator
+from .detect.attribution import CAUSE_ZH, attribute
+from .core.models import RawMessage, Room
+from .ingest.douyin import parse_room, resolve_live_room
+from .ingest.hub import Hub, start_hub
+from .ingest.recorder import Recorder
+from .act.replay import ReplayPolicy
+from .engine import RoomEngine
 
-HUB_DIR = Path(__file__).resolve().parent.parent / "third_party" / "dyhub"
-PROXY_VARS = ("http_proxy", "https_proxy", "all_proxy", "HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY")
-NO_PROXY = urllib.request.build_opener(urllib.request.ProxyHandler({}))
 SPECIAL_METHODS = [  # 未标准化消息按方法名归类（PK 类消息能否拿到是需求文档 Q-1）
     (re.compile(r"LuckyBox|Lottery", re.I), "lucky_bag"),
     (re.compile(r"Envelope|RedPacket", re.I), "red_packet"),
@@ -44,351 +38,13 @@ SPECIAL_METHODS = [  # 未标准化消息按方法名归类（PK 类消息能否
 ]
 
 
-def _env_no_proxy() -> Dict[str, str]:
-    return {k: v for k, v in os.environ.items() if k not in PROXY_VARS}
-
-
-UA = ("Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 "
-      "(KHTML, like Gecko) Chrome/140.0.0.0 Safari/537.36")
-
-
-def parse_room(arg: str) -> Dict[str, Optional[str]]:
-    """支持三种写法：名字=直播间号、名字=live.douyin.com 链接、名字=主播主页链接（douyin.com/user/<sec_uid>）。
-    主页链接适合还没开播的主播：开播后自动查到直播间号。"""
-    name, _, val = arg.partition("=") if "=" in arg else ("", "", arg)
-    m = re.search(r"/user/(MS4w[\w-]+)", val) or re.match(r"(MS4w[\w-]+)$", val.strip())
-    if m:
-        return {"room_id": None, "sec_uid": m.group(1), "anchor": name or m.group(1)[:12]}
-    m = re.search(r"(\d{6,})", val)
-    if not m:
-        raise SystemExit(f"认不出直播间：{arg}（要直播间号、live.douyin.com 链接或主播主页链接）")
-    return {"room_id": m.group(1), "sec_uid": None, "anchor": name or m.group(1)}
-
-
-def _reflow(sec_uid: str) -> Dict[str, Any]:
-    """按主播 sec_uid 查直播间信息（不需要登录）。没开播时 status_code=10011。"""
-    url = ("https://webcast.amemv.com/webcast/room/reflow/info/?type_id=0&live_id=1&room_id=2"
-           f"&sec_user_id={sec_uid}&version_code=99.99.99&app_id=1128")
-    try:
-        with NO_PROXY.open(urllib.request.Request(url, headers={"User-Agent": UA}), timeout=15) as r:
-            d = json.loads(r.read())
-    except (OSError, json.JSONDecodeError):
-        return {}
-    room = (d.get("data") or {}).get("room") or {}
-    return room if d.get("status_code") == 0 and room.get("status") == 2 else {}
-
-
-def resolve_live_room(sec_uid: str) -> Optional[str]:
-    """在播返回直播间号（web_rid），没播返回 None。"""
-    return (_reflow(sec_uid).get("owner") or {}).get("web_rid")
-
-
-# 清晰度（接口 resolution_name 的叫法）：ORIGIN=原画，FULL_HD1=蓝光，HD1=超清，SD2=高清，SD1=标清。
-# 原画不在 flv_pull_url 里，在 live_core_sdk_data.pull_data.stream_data 的 origin 项。
-# 2026-11-24 实测（一个游戏直播间，各录 20 秒）：原画 1920x1080 60 帧约 6.2 Mbps（2.8 GB/时）；
-# 超清 1280x720 60 帧约 2.9 GB/时；高清 1280x720 30 帧约 1.0 GB/时；纯音频（ao）约 0.09 GB/时。
-# 码率随主播的推流设置变化，原画在别的直播间可能到 7～9 GB/时。
-QUALITY_ORDER = ["ORIGIN", "FULL_HD1", "HD1", "SD2", "SD1"]  # 从高到低
-
-
-def _sdk_streams(room: Dict[str, Any]) -> Dict[str, str]:
-    """live_core_sdk_data 里各档的 flv 地址：origin、uhd、hd、sd、ld、md、ao（纯音频）。"""
-    raw = (((room.get("stream_url") or {}).get("live_core_sdk_data") or {}).get("pull_data") or {}).get("stream_data")
-    try:
-        data = json.loads(raw)["data"] if raw else {}
-    except (ValueError, KeyError, TypeError):
-        return {}
-    return {k: (v.get("main") or {}).get("flv") for k, v in data.items() if (v.get("main") or {}).get("flv")}
-
-
-def quality_stream_url(sec_uid: str, quality: str) -> Optional[str]:
-    """按指定清晰度取流；没有这一档就先往低找、再往高找。"""
-    room = _reflow(sec_uid)
-    flv = dict(((room.get("stream_url") or {}).get("flv_pull_url")) or {})
-    origin = _sdk_streams(room).get("origin")
-    if origin:
-        flv["ORIGIN"] = origin
-    i = QUALITY_ORDER.index(quality) if quality in QUALITY_ORDER else 0
-    for q in QUALITY_ORDER[i:] + QUALITY_ORDER[:i][::-1]:
-        if flv.get(q):
-            return flv[q]
-    return next(iter(flv.values()), None)
-
-
-class Hub:
-    def __init__(self, base: str):
-        self.base = base.rstrip("/")
-
-    def _req(self, method: str, path: str, body: Optional[dict] = None, timeout: float = 120) -> Dict[str, Any]:
-        data = json.dumps(body).encode() if body is not None else None
-        req = urllib.request.Request(self.base + path, data=data, method=method,
-                                     headers={"Content-Type": "application/json"} if data else {})
-        try:
-            with NO_PROXY.open(req, timeout=timeout) as r:
-                return json.loads(r.read() or b"{}")
-        except urllib.error.HTTPError as e:
-            try:
-                return json.loads(e.read() or b"{}")
-            except json.JSONDecodeError:
-                return {"error": f"HTTP {e.code}"}
-
-    def alive(self) -> bool:
-        try:
-            self._req("GET", "/api/stats", timeout=3)
-            return True
-        except OSError:
-            return False
-
-    def ensure_account(self) -> None:
-        if not self._req("GET", "/api/accounts").get("accounts"):
-            self._req("POST", "/api/accounts", {"name": "游客"})
-
-    def connect(self, room_id: str) -> Dict[str, Any]:
-        d = self._req("POST", "/api/rooms/connect", {"roomId": room_id})
-        return d.get("room") or d
-
-    def room(self, room_id: str) -> Dict[str, Any]:
-        return self._req("GET", f"/api/rooms/{room_id}").get("room") or {}
-
-    def stream_url(self, room_id: str) -> Optional[str]:
-        return self._req("GET", f"/api/rooms/{room_id}/stream").get("url")
-
-    def events(self, stop: threading.Event):
-        """SSE 事件流；断了自动重连。"""
-        while not stop.is_set():
-            try:
-                with NO_PROXY.open(self.base + "/api/events", timeout=40) as r:
-                    for raw in r:
-                        if stop.is_set():
-                            return
-                        line = raw.decode("utf-8", "replace").rstrip("\n")
-                        if line.startswith("data: "):
-                            try:
-                                yield json.loads(line[6:])
-                            except json.JSONDecodeError:
-                                continue
-            except OSError:
-                if not stop.wait(2):
-                    continue
-
-
-def start_hub(port: int) -> subprocess.Popen:
-    if not (HUB_DIR / "dist" / "index.js").exists():
-        raise SystemExit(f"没找到 dyhub：{HUB_DIR}，先按 README 安装")
-    env = _env_no_proxy() | {"DYHUB_HOST": "127.0.0.1", "DYHUB_PORT": str(port)}
-    log = (HUB_DIR / "dyhub.log").open("a")
-    return subprocess.Popen(["node", "dist/index.js"], cwd=HUB_DIR, env=env, stdout=log, stderr=subprocess.STDOUT)
-
-
-class Recorder(threading.Thread):
-    """一个直播间的录制，ffmpeg 按 10 秒切成小段。
-
-    - 环形缓冲模式（keep_seconds 有值）：只保留最近 keep_seconds 秒，过期且没被"保留"的小段直接删掉；
-      检测到搞笑异常时调用 pin(起, 止) 把那段标为保留。磁盘占用和直播时长无关（FR-3.2、FR-3.3）。
-    - 全程录制模式（keep_seconds=None）：所有小段都保留。
-    结束时 export() 把要保留的连续小段拼成文件，返回 recordings.json 需要的条目。
-
-    同一个 ffmpeg 还顺带把**整场音频**原样存成 audio.ts（不重新编码，mpegts 封装带时间戳，时长准确；约 0.1 GB/时），
-    不管环形缓冲删没删画面，声音都全程保留，给声音分析和离线实验用。音频和画面来自同一路输入，
-    时间天然对齐。结束时整理成 audio_<开始毫秒>.ts，条目在 audio_entries 里（写进 audio.json）。
-    """
-
-    SEG_SECONDS = 10
-
-    def __init__(self, hub: Hub, room_id: str, out_dir: Path, stop: threading.Event, log,
-                 sec_uid: Optional[str] = None, quality: str = "ORIGIN", min_free_gb: float = 15.0,
-                 keep_seconds: Optional[float] = None):
-        super().__init__(daemon=True)
-        self.hub, self.room_id, self.dir, self.stop, self.log = hub, room_id, out_dir, stop, log
-        self.sec_uid, self.quality, self.min_free_gb = sec_uid, quality, min_free_gb
-        self.keep_seconds = keep_seconds
-        self.segments: List[Dict[str, Any]] = []  # {path, start, end, deleted}
-        self.pins: Dict[int, List[float]] = {}
-        self._pin_lock = threading.Lock()
-        self._pin_seq = 0
-        self.proc: Optional[subprocess.Popen] = None
-        self.live = False
-        self.disk_full = False
-        self.deleted_bytes = 0
-        self.with_audio = True  # 流里没有音频时自动关掉，免得 ffmpeg 因为音频输出为空而整个失败
-        self.sessions: List[Dict[str, Any]] = []  # {dir, start}，给整理音频用
-        self.audio_entries: List[Dict[str, Any]] = []
-
-    def pin(self, start: float, end: float = float("inf")) -> int:
-        """标记一段要保留，返回编号；end 不给就是"先占住、还没定终点"。"""
-        with self._pin_lock:
-            self._pin_seq += 1
-            self.pins[self._pin_seq] = [start, end]
-            return self._pin_seq
-
-    def set_pin(self, pid: int, start: float, end: float) -> None:
-        with self._pin_lock:
-            self.pins[pid] = [start, end]
-
-    def unpin(self, pid: int) -> None:
-        with self._pin_lock:
-            self.pins.pop(pid, None)
-
-    def _pinned(self, a: float, b: float) -> bool:
-        with self._pin_lock:
-            spans = list(self.pins.values())
-        return any(a < pe and ps < b for ps, pe in spans)
-
-    def _free_gb(self) -> float:
-        return shutil.disk_usage(self.dir).free / 1e9
-
-    def disk_bytes(self) -> int:
-        return sum(p.stat().st_size for p in self.dir.rglob("*.ts")) if self.dir.exists() else 0
-
-    def _url(self) -> Optional[str]:
-        """优先按主页 ID 取指定清晰度的流；取不到再用 dyhub 给的播放器地址（可能是原画，体积大）。"""
-        if not self.sec_uid:
-            self.sec_uid = ((self.hub.room(self.room_id).get("meta") or {}).get("secUid")) or None
-        if self.sec_uid:
-            url = quality_stream_url(self.sec_uid, self.quality)
-            if url:
-                return url
-        self.log(f"[录制] {self.room_id} 取不到指定清晰度，退回播放器地址（可能是原画）")
-        return self.hub.stream_url(self.room_id)
-
-    def _scan(self, sess: Path, start: float, known: set) -> None:
-        """读 ffmpeg 写的分段清单（每完成一段写一行：文件名,起,止，相对本段录制开头）。"""
-        lst = sess / "list.csv"
-        if not lst.exists():
-            return
-        for line in lst.read_text().splitlines():
-            parts = line.strip().split(",")
-            if len(parts) < 3 or parts[0] in known:
-                continue
-            known.add(parts[0])
-            self.segments.append({"path": sess / parts[0], "start": start + float(parts[1]),
-                                  "end": start + float(parts[2]), "deleted": False})
-
-    def _expire(self, now: float) -> None:
-        if self.keep_seconds is None:
-            return
-        for seg in self.segments:
-            if not seg["deleted"] and seg["end"] < now - self.keep_seconds and not self._pinned(seg["start"], seg["end"]):
-                try:
-                    self.deleted_bytes += seg["path"].stat().st_size
-                    seg["path"].unlink()
-                except OSError:
-                    pass
-                seg["deleted"] = True
-
-    def run(self) -> None:
-        self.dir.mkdir(parents=True, exist_ok=True)
-        while not self.stop.is_set():
-            if self._free_gb() < self.min_free_gb:  # 磁盘保护（FR-12.2）
-                if not self.disk_full:
-                    self.log(f"[录制] 磁盘剩余不足 {self.min_free_gb:.0f} GB，停止录制 {self.room_id}（弹幕继续采集）")
-                    self.disk_full = True
-                self.stop.wait(60)
-                continue
-            url = self._url() if self.live else None
-            if not url:
-                self.stop.wait(10)
-                continue
-            sess = self.dir / str(int(time.time() * 1000))
-            sess.mkdir(parents=True, exist_ok=True)
-            self.proc = subprocess.Popen(
-                ["ffmpeg", "-hide_banner", "-loglevel", "error", "-nostdin", "-rw_timeout", "15000000",
-                 "-i", url, "-c", "copy", "-f", "segment", "-segment_time", str(self.SEG_SECONDS),
-                 "-segment_format", "mpegts", "-reset_timestamps", "1",
-                 "-segment_list", str(sess / "list.csv"), "-segment_list_type", "csv", str(sess / "seg_%05d.ts")]
-                + (["-map", "0:a:0", "-c", "copy", "-f", "mpegts", str(sess / "audio.ts")] if self.with_audio else []),
-                env=_env_no_proxy(), stdout=subprocess.DEVNULL, stderr=subprocess.PIPE,
-            )
-            first = sess / "seg_00000.ts"
-            start = None
-            known: set = set()
-            last_check = time.time()
-            while self.proc.poll() is None and not self.stop.is_set():
-                if start is None and first.exists() and first.stat().st_size > 0:
-                    start = time.time()  # 第一个字节落盘的时刻 ≈ 本段录制第 0 秒（误差待实测，Q-6）
-                    self.sessions.append({"dir": sess, "start": start})
-                if start is not None and time.time() - last_check > 5:
-                    last_check = time.time()
-                    self._scan(sess, start, known)
-                    self._expire(time.time())
-                    if self._free_gb() < self.min_free_gb:
-                        break
-                time.sleep(0.2)
-            if self.proc.poll() is None:
-                self.proc.terminate()
-                try:
-                    self.proc.wait(10)
-                except subprocess.TimeoutExpired:
-                    self.proc.kill()
-            err = (self.proc.stderr.read() or b"").decode("utf-8", "replace")[-300:]
-            if self.with_audio and "audio.ts" in err and ("does not contain any stream" in err or "matches no streams" in err):
-                self.with_audio = False
-                self.log(f"[录制] {self.room_id} 流里没有音频，之后只录画面")
-            if start is not None:
-                self._scan(sess, start, known)
-                self.log(f"[录制] {self.room_id} 一段录制结束，共 {len(known)} 个小段"
-                         + (f"；{err.strip()}" if err.strip() else ""))
-            if not self.stop.is_set():
-                self.stop.wait(5)
-
-    def _export_audio(self, out_root: Path) -> None:
-        """把每段录制的整场音频移出临时目录（临时目录随后会被删掉）。"""
-        for ss in self.sessions:
-            src = ss["dir"] / "audio.ts"
-            if not src.exists() or src.stat().st_size == 0:
-                continue
-            dst = self.dir / f"audio_{int(ss['start'] * 1000)}.ts"
-            shutil.move(str(src), str(dst))
-            dur = media.probe(dst).get("duration")
-            if dur:
-                self.audio_entries.append({"path": str(dst.relative_to(out_root)), "start_ts": round(ss["start"], 3),
-                                           "duration": round(dur, 3)})
-
-    def export(self, out_root: Path) -> List[Dict[str, Any]]:
-        """把要保留的小段按连续区间拼成文件，删掉其余小段。返回 recordings.json 的条目。"""
-        self._export_audio(out_root)
-        segs = sorted((s for s in self.segments if not s["deleted"] and s["path"].exists()), key=lambda s: s["start"])
-        if self.keep_seconds is not None:
-            segs = [s for s in segs if self._pinned(s["start"], s["end"])]
-        groups: List[List[Dict[str, Any]]] = []
-        for s in segs:
-            if groups and s["path"].parent == groups[-1][-1]["path"].parent and s["start"] - groups[-1][-1]["end"] < 1.0:
-                groups[-1].append(s)
-            else:
-                groups.append([s])
-        entries = []
-        for g in groups:
-            out = self.dir / f"{int(g[0]['start'] * 1000)}.ts"
-            lst = self.dir / "concat.txt"
-            lst.write_text("".join(f"file '{s['path'].resolve()}'\n" for s in g))
-            r = subprocess.run(["ffmpeg", "-hide_banner", "-loglevel", "error", "-y", "-f", "concat", "-safe", "0",
-                                "-i", str(lst), "-c", "copy", "-f", "mpegts", str(out)], capture_output=True, text=True)
-            lst.unlink()
-            dur = media.probe(out).get("duration") if r.returncode == 0 else None
-            if dur:
-                entries.append({"path": str(out.relative_to(out_root)), "start_ts": round(g[0]["start"], 3),
-                                "duration": round(dur, 3)})
-            else:
-                self.log(f"[录制] {self.room_id} 拼接失败：{r.stderr[-200:]}")
-        for sess in [p for p in self.dir.iterdir() if p.is_dir()]:
-            shutil.rmtree(sess, ignore_errors=True)
-        return entries
-
-
 class Collector:
     def __init__(self, rooms: List[Dict[str, Optional[str]]], out: Path, hub: Hub, salt: str, cfg: Dict[str, Any],
                  quality: str = "ORIGIN", min_free_gb: float = 15.0, full_record: bool = False):
         self.out, self.hub, self.salt, self.cfg = out, hub, salt, cfg
         self.quality, self.min_free_gb = quality, min_free_gb
-        live = cfg.get("live", {})
-        self.pin_causes = set(live.get("pin_causes", ["content"]))
-        self.pin_pre = float(live.get("pin_pre_seconds", 60))
-        self.pin_post = float(live.get("pin_post_seconds", 20))
-        # 即时重放：确认异常结束后，从确认时刻往回存 replay_seconds 秒（异常本身更长时从异常开始前 pin_pre 秒起存）。
-        # 异常一开始就先占住"开始时刻往前 replay_seconds 秒起"的录像，等结束、归因完再定稿或释放，
-        # 所以缓冲只要盖住 replay_seconds 加上检测延迟的余量，和异常持续多久无关。
-        self.replay = float(live.get("replay_seconds", 300))
-        self.keep_seconds = None if full_record else self.replay + 60
+        self.policy = ReplayPolicy(cfg)  # 即时重放：先占住，确认结束后定稿或释放（act/replay.py）
+        self.keep_seconds = self.policy.keep_seconds(full_record)
         self.held: Dict[str, int] = {}  # 直播间 → 正在占住的保留编号
         self.q: "queue.Queue" = queue.Queue()
         self.triggers: List[Dict[str, Any]] = []
@@ -481,18 +137,16 @@ class Collector:
 
     def _detect(self) -> None:
         """实时检测：和离线回放用同一套信号聚合、热度检测、归因代码（需求 8.3 节）。"""
-        aggs: Dict[str, SignalAggregator] = {}
-        dets: Dict[str, HeatDetector] = {}
+        engines: Dict[str, RoomEngine] = {}
         cur: Dict[str, int] = {}
 
         def tick(rid: str, t: int) -> None:
-            _, ev = dets[rid].update(aggs[rid].close(float(t)))
-            opened = dets[rid].pop_opened()
-            if opened is not None and rid in self.recorders:
+            st = engines[rid].step(float(t))
+            if st.opened is not None and rid in self.recorders:
                 # 先占住，免得等"确认结束"的这段时间里，前面的录像被环形缓冲删掉
-                self.held[rid] = self.recorders[rid].pin(opened - self.replay)
-            if ev:
-                self._on_event(ev)
+                self.held[rid] = self.recorders[rid].pin(self.policy.hold_start(st.opened))
+            if st.event:
+                self._on_event(st.event)
 
         while not (self.stop.is_set() and self.q.empty()):
             try:
@@ -500,19 +154,19 @@ class Collector:
             except queue.Empty:
                 rid, msg = None, None
             if rid is not None:
-                if rid not in aggs:
-                    aggs[rid], dets[rid], cur[rid] = SignalAggregator(rid, self.cfg), HeatDetector(rid, self.cfg), int(msg.recv_ts)
+                if rid not in engines:
+                    engines[rid], cur[rid] = RoomEngine(rid, self.cfg), int(msg.recv_ts)
                 while cur[rid] < int(msg.recv_ts):
                     tick(rid, cur[rid])
                     cur[rid] += 1
-                aggs[rid].feed(msg)
+                engines[rid].feed(msg)
             now = int(time.time())
             for r in list(cur):
                 while cur[r] < now - 2:  # 留 2 秒给晚到的消息
                     tick(r, cur[r])
                     cur[r] += 1
-        for r in list(dets):
-            ev = dets[r].flush(float(cur[r]))
+        for r in list(engines):
+            ev = engines[r].flush(float(cur[r]))
             if ev:
                 self._on_event(ev)
 
@@ -523,14 +177,12 @@ class Collector:
         attr = attribute(ev, room, self.cfg)
         self.anomalies += 1
         hhmm = time.strftime("%H:%M:%S", time.localtime(ev.start))
-        keep = attr.cause in self.pin_causes
+        keep = self.policy.keeps(attr.cause)
         msg = (f"[{'触发' if keep else '异常'}] {info['anchor']} {hhmm} 起 {ev.end - ev.start:.0f} 秒，"
                f"{CAUSE_ZH.get(attr.cause, attr.cause)}，{ev.channel} z={ev.peak_z}")
         rec, held = self.recorders.get(ev.room_id), self.held.pop(ev.room_id, None)
         if keep:
-            # 即时重放：从"确认结束"的时刻往回存 replay 秒；异常本身更长时从异常开始前 pin_pre 秒起存
-            a = min(ev.closed_at - self.replay, ev.start - self.pin_pre)
-            b = max(ev.closed_at, ev.end + self.pin_post)
+            a, b = self.policy.window(ev)
             if rec is not None:
                 if held is not None:
                     rec.set_pin(held, a, b)
@@ -589,7 +241,7 @@ class Collector:
         deadline = time.time() + hours * 3600
         threading.Thread(target=lambda: (self.stop.wait(max(0, deadline - time.time())), self.stop.set()), daemon=True).start()
         mode = ("全程录制" if self.keep_seconds is None else
-                f"环形缓冲（只保留最近 {self.keep_seconds / 60:.1f} 分钟；确认搞笑异常结束后往回存 {self.replay / 60:.0f} 分钟）")
+                f"环形缓冲（只保留最近 {self.keep_seconds / 60:.1f} 分钟；确认搞笑异常结束后往回存 {self.policy.replay / 60:.0f} 分钟）")
         self.log(f"开始采集：{len(self.rooms)} 个直播间，另有 {len(self.pending)} 位主播等待开播；"
                  f"最长 {hours} 小时，Ctrl+C 结束。录制方式：{mode}。输出：{self.out}")
         try:
