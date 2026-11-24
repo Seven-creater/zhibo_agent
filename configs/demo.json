@@ -87,7 +87,47 @@
     "spam_unique_ratio": 0.25,
     "spam_copy_ratio": 0.5,
     "lucky_copy_min": 5,
-    "laugh_led_min_ratio": 0.05
+    "laugh_led_min_ratio": 0.05,
+    "audio_laugh_min": 0.4,
+    "transcript_lucky_words": [
+      "福袋",
+      "抽奖",
+      "口令",
+      "红包",
+      "中奖"
+    ]
+  },
+  "fuse": {
+    "audio_lead_seconds": 5,
+    "weights": {
+      "laugh_users": 3,
+      "chat_users": 1.5,
+      "likes": 0.5,
+      "gift": 0.5,
+      "a_spike": 2,
+      "a_burst": 1,
+      "a_laugh": 2.5,
+      "a_cheer": 1,
+      "a_gun": 0.5
+    },
+    "z_low": 2,
+    "z_high": 6,
+    "p_low": 0.15,
+    "p_high": 0.6,
+    "on": 0.3,
+    "hold_seconds": 10,
+    "agreement_bonus": 0.25,
+    "saturation_window": 600,
+    "saturation_ratio": 0.55,
+    "saturation_discount": 0.25,
+    "enter": 3.0,
+    "min_seconds": 3,
+    "exit": 1.0,
+    "baseline_update_max": 1.5,
+    "std_floor": {
+      "a_spike": 0.3,
+      "a_burst": 3
+    }
   },
   "trigger_causes": [
     "content"

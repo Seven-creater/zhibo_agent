@@ -45,6 +45,10 @@ def run_pipeline(cfg: Dict[str, Any], dataset_dir: Path, out_dir: Path) -> Dict[
     src = ReplaySource(dataset_dir)
     rooms = {r.room_id: r for r in src.rooms}
     engines = {rid: RoomEngine(rid, cfg) for rid in rooms}
+    fused = cfg["heat"].get("kind", "chat_z") == "fused"
+    perception = {rid: src.perception(rid) for rid in rooms} if fused else {}
+    transcripts = {rid: src.transcript(rid) for rid in rooms} if fused else {}
+    lead = float(cfg.get("fuse", {}).get("audio_lead_seconds", 0))
     sched = Scheduler(rooms, cfg)
     b0 = cfg["backtrack"]
     judge = make_judge(cfg["judge"])
@@ -81,6 +85,10 @@ def run_pipeline(cfg: Dict[str, Any], dataset_dir: Path, out_dir: Path) -> Dict[
     def handle(ev: HeatEvent, now: float) -> None:
         events.append(ev)
         room = rooms[ev.room_id]
+        if fused:  # 异常期间（换算回声音时间）主播说的话，给归因看关键词
+            a0, a1 = ev.start - lead - 30, ev.end - lead
+            ev.stats["transcript"] = " / ".join(x["text"] for x in transcripts.get(ev.room_id, [])
+                                                 if a0 <= x["start"] <= a1)[:400]
         attr = attribute(ev, room, cfg)
         attrs.append(attr)
         if attr.cause not in cfg["trigger_causes"]:
@@ -196,6 +204,8 @@ def run_pipeline(cfg: Dict[str, Any], dataset_dir: Path, out_dir: Path) -> Dict[
         for rid in sorted(rooms):
             if not rooms[rid].is_live(t):
                 continue
+            if fused:
+                engines[rid].feed_audio(perception[rid].get(int(t)))
             st = engines[rid].step(t)
             signals.append(st.point.to_row())
             sched.observe(rid, t, st.point.online, engines[rid].z_smooth)

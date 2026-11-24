@@ -37,6 +37,20 @@ def attribute(ev: HeatEvent, room: Room, cfg: Dict[str, Any]) -> Attribution:
         ev_lines.append(f"弹幕文本重复度高：不同文本占比 {s['text_unique_ratio']}")
         return Attribution(ev.event_id, "lucky_bag", 0.9, ev_lines)
 
+    # 主播在笑、观众也在发笑点弹幕：优先算内容驱动。放在"福袋口令串"之前，因为有的直播间整场都有人刷福袋口令，
+    # 会盖过真笑点（test10 天霸 +97s：主播说"银铃般的笑声……杠铃般"，弹幕"哈哈哈""我的假牙"，原来被判成福袋）
+    ap = s.get("audio_peaks") or {}
+    laugh = ap.get("laugh") or {}
+    if (laugh.get("value", 0) >= float(a.get("audio_laugh_min", 0.4))
+            and s["laugh_ratio"] >= float(a.get("laugh_led_min_ratio", 0.05))):
+        ev_lines.append(f"主播这边有笑声（声音分类概率 {laugh['value']:.2f}，+{laugh['t'] - room.start_ts:.0f}s），"
+                        f"观众笑点/惊讶词占比 {s['laugh_ratio']:.0%}")
+        if s.get("transcript"):
+            ev_lines.append(f"主播在说：{s['transcript'][:40]}")
+        if s.get("copy_lucky", 0):
+            ev_lines.append(f"同期也有 {s['copy_lucky']} 条福袋口令串，但主播和观众都在笑")
+        return Attribution(ev.event_id, "content", round(min(0.9, 0.5 + laugh["value"] / 2), 2), ev_lines)
+
     # 游客态收不到福袋消息（2026-11-24 实测），只能从"很多人发同一句带福袋口令的话"推断
     if s.get("copy_lucky", 0) >= int(a.get("lucky_copy_min", 5)):
         ev_lines.append(f"{s['copy_lucky']} 条复制粘贴的口令弹幕带福袋提示词，例如「{(s.get('top_copies') or [''])[0][:30]}」")
@@ -57,6 +71,23 @@ def attribute(ev: HeatEvent, room: Room, cfg: Dict[str, Any]) -> Attribution:
         ev_lines.append(f"礼物里最大一位用户占 {s['gift_top1_share']:.0%}，弹幕没有同步放量")
         return Attribution(ev.event_id, "single_user_gift", 0.85, ev_lines)
 
+    # 融合检测才有声音证据（stats.audio_peaks）和主播逐句稿（stats.transcript）
+    ap = s.get("audio_peaks")
+    if ap:
+        said = s.get("transcript") or ""
+        laugh = ap.get("laugh") or {}
+        if laugh.get("value", 0) >= float(a.get("audio_laugh_min", 0.4)):
+            ev_lines.append(f"主播这边有笑声（声音分类概率 {laugh['value']:.2f}，+{laugh['t'] - room.start_ts:.0f}s）")
+            if said:
+                ev_lines.append(f"主播在说：{said[:40]}")
+            ev_lines.append(f"弹幕 {s['chat_users']} 人，笑点/惊讶词占比 {s['laugh_ratio']:.0%}")
+            ev_lines.append("排除：异常前后没有福袋/红包/PK 消息，不在开播期，礼物不集中在一人")
+            return Attribution(ev.event_id, "content", round(min(0.9, 0.5 + laugh["value"] / 2), 2), ev_lines)
+        hit = [w for w in a.get("transcript_lucky_words", []) if w in said]
+        if hit and s["laugh_ratio"] < float(a["content_laugh_ratio"]):
+            ev_lines.append(f"主播在异常期间说到「{'、'.join(hit)}」：{said[:40]}")
+            return Attribution(ev.event_id, "lucky_bag", 0.6, ev_lines)
+
     # 合并后的长异常里有一段笑点爆发：笑点信号本身过了进入阈值，前后 30 秒笑点占比也够（2026-11-24 实测）
     lb = s.get("laugh_burst") or {}
     burst = (lb.get("z") is not None and lb["z"] >= float(cfg["heat"]["z_enter"])
@@ -76,7 +107,8 @@ def attribute(ev: HeatEvent, room: Room, cfg: Dict[str, Any]) -> Attribution:
         return Attribution(ev.event_id, "chat_spam", 0.6, ev_lines)
 
     # 大直播间弹幕多，笑点占比天然偏低；只要笑点信号本身是这次异常的主导信号，也算内容驱动（2026-11-24 实测）
-    laugh_led = ev.channel == "laugh_users" and s["laugh_ratio"] >= float(a.get("laugh_led_min_ratio", 0.05))
+    laugh_led = (ev.channel in ("laugh_users", "a_laugh")
+                 and s["laugh_ratio"] >= float(a.get("laugh_led_min_ratio", 0.05)))
     if s["laugh_ratio"] >= float(a["content_laugh_ratio"]) or laugh_led:
         if laugh_led and s["laugh_ratio"] < float(a["content_laugh_ratio"]):
             ev_lines.append(f"笑点信号是这次异常的主导信号（z={ev.peak_z}），虽然笑点占比只有 {s['laugh_ratio']:.0%}")

@@ -1,0 +1,7 @@
+{
+  "extends": "live.json",
+  "run_name": "fused",
+  "heat": {
+    "kind": "fused"
+  }
+}

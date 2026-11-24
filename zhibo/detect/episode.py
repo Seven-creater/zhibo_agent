@@ -160,6 +160,15 @@ class HeatDetector:
             "peak_z_by_channel": {c: round(z, 2) for c, z in ep["peaks"].items()},
             "laugh_burst": laugh_burst,
         }
+        heard = [q for q in inside if q.audio]
+        if heard:  # 有声音感知时（融合检测），记下异常期间各声音通道的峰值和出现时刻，给归因和判定用
+            peaks = {}
+            for key in ("laugh", "cheer", "gun", "spike", "burst", "db"):
+                best = max(heard, key=lambda q: q.audio.get(key, float("-inf")))
+                if key in best.audio:
+                    peaks[key] = {"value": best.audio[key], "t": best.t}
+            peaks["speech_ratio"] = round(sum(q.audio.get("speech", 0) for q in heard) / len(heard), 2)
+            stats["audio_peaks"] = peaks
         return HeatEvent(
             event_id=f"{self.room_id}-ev{self._seq:03d}",
             room_id=self.room_id,

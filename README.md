@@ -76,7 +76,17 @@ scripts/fetch_models.sh
 .venv/bin/python -m zhibo perceive --data data/live_<日期_时间>
 ```
 
-输出 `perception/<room_id>.jsonl`（每秒一行：音量 dBFS、相对突变、短促爆发、过零率、说话占比，以及笑声、喊叫、欢呼、枪炮、音乐的概率）和 `transcript/<room_id>.jsonl`（主播的逐句稿）。M1 上约 25 倍实时。这些结果还没有接进检测，接入是第 3 阶段。
+输出 `perception/<room_id>.jsonl`（每秒一行：音量 dBFS、相对突变、短促爆发、过零率、说话占比，以及笑声、喊叫、欢呼、枪炮、音乐的概率）和 `transcript/<room_id>.jsonl`（主播的逐句稿）。M1 上约 25 倍实时。
+
+### 融合检测（重构第 3 阶段，离线可用）
+
+补算过声音感知的数据集，可以用弹幕 + 声音的融合检测跑：
+
+```bash
+python3 -m zhibo run --config configs/fused.json --data data/live_<日期_时间>
+```
+
+每路信号变成 0～1 的激活度（弹幕和音量看相对本直播间基线的 z 值，笑声等看分类概率），保持最近 10 秒的最大值，按权重相加；几路同时亮加分，整场常亮的降权。声音比弹幕早，先往后挪 5 秒再对齐。参数在配置的 `fuse` 一节，都是起步值，要用真实数据调。`configs/live.json` 仍然只用弹幕（`heat.kind = chat_z`），实时采集还没接声音（第 4 阶段）。
 
 ## 代码结构
 
@@ -90,7 +100,7 @@ zhibo/
   core/            models 数据结构 · config 配置 · ledger 模型请求账本 · media FFmpeg 工具
   ingest/          douyin 抖音接口 · hub dyhub 客户端 · recorder 录制（环形缓冲 + 整场音频） · sources 回放数据源
   perceive/        chat 弹幕信号 · audio 音量特征 · speech 说话检测和转写 · tagger 声音分类 · hearing 声音感知总装（以后加 scene）
-  detect/          episode 异常开始/结束 · attribution 归因
+  detect/          episode 只看弹幕的检测 · fuse 弹幕 + 声音融合检测 · attribution 归因
   act/             replay 即时重放保留策略 · scheduler 录制路数调度
   edit/            backtrack 回溯找边界 · judge 判定器 · render 出片
   evaluate/        evaluate 指标 · report 报告 · demo_data 合成数据

@@ -52,11 +52,14 @@ class SignalPoint:
     online: Optional[int] = None
     specials: List[str] = field(default_factory=list)  # 本秒出现的福袋、红包、PK 等
     missing: bool = False  # True = 这一秒没收到（断线），不是"没有消息"
+    audio: Dict[str, Any] = field(default_factory=dict)  # 这一秒的声音感知（已按声音领先弹幕的秒数对齐），没有就空
     detail: Dict[str, Any] = field(default_factory=dict, repr=False)
 
     def to_row(self) -> Dict[str, Any]:
         d = asdict(self)
         d.pop("detail", None)
+        if not d["audio"]:  # 只有弹幕时输出格式和以前一样
+            d.pop("audio")
         return d
 
 

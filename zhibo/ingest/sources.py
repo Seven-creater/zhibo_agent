@@ -10,7 +10,7 @@ import heapq
 import json
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Dict, Iterator, List, Optional
+from typing import Any, Dict, Iterator, List, Optional
 
 from ..core.models import RawMessage, Room
 
@@ -40,6 +40,7 @@ class ReplaySource:
                   for r in (v if isinstance(v, list) else [v])]
             for rid, v in recs.items()
         }
+        self._perception: Dict[str, Dict[int, Dict[str, Any]]] = {}
 
     def _room_stream(self, room_id: str) -> Iterator[RawMessage]:
         path = self.dir / "messages" / f"{room_id}.jsonl"
@@ -52,6 +53,26 @@ class ReplaySource:
         """所有直播间的消息按 recv_ts 归并成一条流。"""
         streams = [self._room_stream(r.room_id) for r in self.rooms]
         return heapq.merge(*streams, key=lambda m: (m.recv_ts, m.room_id))
+
+    def perception(self, room_id: str) -> Dict[int, Dict[str, Any]]:
+        """声音感知（perception/<room_id>.jsonl，由 perceive 命令补算），按整数秒索引；没有就空。"""
+        if room_id not in self._perception:
+            f = self.dir / "perception" / f"{room_id}.jsonl"
+            rows: Dict[int, Dict[str, Any]] = {}
+            if f.exists():
+                for line in f.open(encoding="utf-8"):
+                    if line.strip():
+                        r = json.loads(line)
+                        rows[int(r["t"])] = r
+            self._perception[room_id] = rows
+        return self._perception[room_id]
+
+    def transcript(self, room_id: str) -> List[Dict[str, Any]]:
+        """主播逐句稿（transcript/<room_id>.jsonl）；没有就空。"""
+        f = self.dir / "transcript" / f"{room_id}.jsonl"
+        if not f.exists():
+            return []
+        return [json.loads(line) for line in f.open(encoding="utf-8") if line.strip()]
 
     def recording(self, room_id: str, t: Optional[float] = None) -> Optional[Recording]:
         """返回覆盖时刻 t 的那段录像；t 为空时返回第一段；这一刻没有录像返回 None。"""
