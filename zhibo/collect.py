@@ -16,6 +16,7 @@ import json
 import os
 import re
 import secrets
+import shutil
 import signal
 import subprocess
 import threading
@@ -59,19 +60,36 @@ def parse_room(arg: str) -> Dict[str, Optional[str]]:
     return {"room_id": m.group(1), "sec_uid": None, "anchor": name or m.group(1)}
 
 
-def resolve_live_room(sec_uid: str) -> Optional[str]:
-    """按主播 sec_uid 查是否在播；在播返回直播间号（web_rid），没播返回 None。不需要登录。"""
+def _reflow(sec_uid: str) -> Dict[str, Any]:
+    """按主播 sec_uid 查直播间信息（不需要登录）。没开播时 status_code=10011。"""
     url = ("https://webcast.amemv.com/webcast/room/reflow/info/?type_id=0&live_id=1&room_id=2"
            f"&sec_user_id={sec_uid}&version_code=99.99.99&app_id=1128")
     try:
         with NO_PROXY.open(urllib.request.Request(url, headers={"User-Agent": UA}), timeout=15) as r:
             d = json.loads(r.read())
     except (OSError, json.JSONDecodeError):
-        return None
+        return {}
     room = (d.get("data") or {}).get("room") or {}
-    if d.get("status_code") == 0 and room.get("status") == 2:
-        return (room.get("owner") or {}).get("web_rid")
-    return None
+    return room if d.get("status_code") == 0 and room.get("status") == 2 else {}
+
+
+def resolve_live_room(sec_uid: str) -> Optional[str]:
+    """在播返回直播间号（web_rid），没播返回 None。"""
+    return (_reflow(sec_uid).get("owner") or {}).get("web_rid")
+
+
+# 清晰度：FULL_HD1=超清(_uhd)，HD1=高清(_hd)，SD2=标清(_sd)，SD1=流畅(_ld)。
+# 实测（Gus 直播间）：HD1 720p 约 2.9 GB/时，SD2 720p 约 1.0 GB/时，SD1 540p 约 0.5 GB/时；
+# 播放器默认拉的原画可达约 9 GB/时。
+QUALITY_ORDER = ["SD2", "SD1", "HD1", "FULL_HD1"]
+
+
+def quality_stream_url(sec_uid: str, quality: str) -> Optional[str]:
+    flv = ((_reflow(sec_uid).get("stream_url") or {}).get("flv_pull_url")) or {}
+    for q in [quality] + [q for q in QUALITY_ORDER if q != quality]:
+        if flv.get(q):
+            return flv[q]
+    return next(iter(flv.values()), None)
 
 
 class Hub:
@@ -142,17 +160,40 @@ def start_hub(port: int) -> subprocess.Popen:
 class Recorder(threading.Thread):
     """一个直播间的录制：每次 ffmpeg 进程是一段，记下这段第一个字节落盘的时刻。"""
 
-    def __init__(self, hub: Hub, room_id: str, out_dir: Path, stop: threading.Event, log):
+    def __init__(self, hub: Hub, room_id: str, out_dir: Path, stop: threading.Event, log,
+                 sec_uid: Optional[str] = None, quality: str = "SD2", min_free_gb: float = 15.0):
         super().__init__(daemon=True)
         self.hub, self.room_id, self.dir, self.stop, self.log = hub, room_id, out_dir, stop, log
+        self.sec_uid, self.quality, self.min_free_gb = sec_uid, quality, min_free_gb
         self.sessions: List[Dict[str, Any]] = []
         self.proc: Optional[subprocess.Popen] = None
         self.live = False
+        self.disk_full = False
+
+    def _free_gb(self) -> float:
+        return shutil.disk_usage(self.dir).free / 1e9
+
+    def _url(self) -> Optional[str]:
+        """优先按主页 ID 取指定清晰度的流；取不到再用 dyhub 给的播放器地址（可能是原画，体积大）。"""
+        if not self.sec_uid:
+            self.sec_uid = ((self.hub.room(self.room_id).get("meta") or {}).get("secUid")) or None
+        if self.sec_uid:
+            url = quality_stream_url(self.sec_uid, self.quality)
+            if url:
+                return url
+        self.log(f"[录制] {self.room_id} 取不到指定清晰度，退回播放器地址（可能是原画）")
+        return self.hub.stream_url(self.room_id)
 
     def run(self) -> None:
         self.dir.mkdir(parents=True, exist_ok=True)
         while not self.stop.is_set():
-            url = self.hub.stream_url(self.room_id) if self.live else None
+            if self._free_gb() < self.min_free_gb:  # 磁盘保护（FR-12.2）
+                if not self.disk_full:
+                    self.log(f"[录制] 磁盘剩余不足 {self.min_free_gb:.0f} GB，停止录制 {self.room_id}（弹幕继续采集）")
+                    self.disk_full = True
+                self.stop.wait(60)
+                continue
+            url = self._url() if self.live else None
             if not url:
                 self.stop.wait(10)
                 continue
@@ -163,9 +204,14 @@ class Recorder(threading.Thread):
                 env=_env_no_proxy(), stdout=subprocess.DEVNULL, stderr=subprocess.PIPE,
             )
             start = None
+            last_check = time.time()
             while self.proc.poll() is None and not self.stop.is_set():
                 if start is None and path.exists() and path.stat().st_size > 0:
                     start = time.time()  # 第一个字节落盘的时刻 ≈ 录像第 0 秒（误差待实测，Q-6）
+                if time.time() - last_check > 30:
+                    last_check = time.time()
+                    if self._free_gb() < self.min_free_gb:
+                        break
                 time.sleep(0.2)
             if self.proc.poll() is None:
                 self.proc.terminate()
@@ -184,8 +230,10 @@ class Recorder(threading.Thread):
 
 
 class Collector:
-    def __init__(self, rooms: List[Dict[str, Optional[str]]], out: Path, hub: Hub, salt: str):
+    def __init__(self, rooms: List[Dict[str, Optional[str]]], out: Path, hub: Hub, salt: str,
+                 quality: str = "SD2", min_free_gb: float = 15.0):
         self.out, self.hub, self.salt = out, hub, salt
+        self.quality, self.min_free_gb = quality, min_free_gb
         self.stop = threading.Event()
         (out / "messages").mkdir(parents=True, exist_ok=True)
         self.logf = (out / "collect.log").open("a", encoding="utf-8")
@@ -207,7 +255,8 @@ class Collector:
         rid = r["room_id"]
         self.files[rid] = (self.out / "messages" / f"{rid}.jsonl").open("a", encoding="utf-8")
         self.status[rid] = "waiting"
-        self.recorders[rid] = Recorder(self.hub, rid, self.out / "recordings" / rid, self.stop, self.log)
+        self.recorders[rid] = Recorder(self.hub, rid, self.out / "recordings" / rid, self.stop, self.log,
+                                       sec_uid=r.get("sec_uid"), quality=self.quality, min_free_gb=self.min_free_gb)
         self.rooms[rid] = r
         if self.started:
             self.recorders[rid].start()
@@ -399,7 +448,8 @@ def cmd_collect(args, cfg: Dict[str, Any]) -> None:
 
     signal.signal(signal.SIGTERM, _on_term)
     try:
-        Collector(rooms, out, hub, salt_file.read_text().strip()).run(args.hours, cfg["signals"]["laugh_words"])
+        Collector(rooms, out, hub, salt_file.read_text().strip(), quality=args.quality,
+                  min_free_gb=args.min_free_gb).run(args.hours, cfg["signals"]["laugh_words"])
     finally:
         if proc:
             proc.terminate()

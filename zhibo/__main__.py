@@ -103,6 +103,9 @@ def main(argv=None) -> None:
     p.add_argument("--out", help="输出目录，默认 data/live_<日期_时间>")
     p.add_argument("--port", type=int, default=8757)
     p.add_argument("--start-hub", action="store_true", help="dyhub 没在运行时顺带启动")
+    p.add_argument("--quality", default="SD2", choices=["SD1", "SD2", "HD1", "FULL_HD1"],
+                   help="录制清晰度：SD2 标清 720p 约 1 GB/时（默认），SD1 流畅 540p，HD1 高清，FULL_HD1 超清")
+    p.add_argument("--min-free-gb", type=float, default=15.0, help="磁盘剩余低于这个值就停止录制")
     p.add_argument("--config", default="configs/live.json")
     p.set_defaults(fn=cmd_collect)
     p = sub.add_parser("eval")

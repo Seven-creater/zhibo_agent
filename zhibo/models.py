@@ -44,7 +44,8 @@ class SignalPoint:
     chat: int = 0
     chat_users: int = 0
     laugh: int = 0
-    laugh_users: int = 0  # 发笑点弹幕的不同用户数（防同一人刷屏）
+    laugh_users: int = 0  # 发笑点弹幕的不同用户数（防同一人刷屏），不含复制粘贴的串
+    copy: int = 0  # 复制粘贴的串 / 口令弹幕数
     gift_value: float = 0.0  # 去重后的钻石价值
     likes: int = 0
     enters: int = 0

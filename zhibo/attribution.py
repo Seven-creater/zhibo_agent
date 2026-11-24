@@ -37,6 +37,11 @@ def attribute(ev: HeatEvent, room: Room, cfg: Dict[str, Any]) -> Attribution:
         ev_lines.append(f"弹幕文本重复度高：不同文本占比 {s['text_unique_ratio']}")
         return Attribution(ev.event_id, "lucky_bag", 0.9, ev_lines)
 
+    # 游客态收不到福袋消息（2026-11-24 实测），只能从"很多人发同一句带福袋口令的话"推断
+    if s.get("copy_lucky", 0) >= int(a.get("lucky_copy_min", 5)):
+        ev_lines.append(f"{s['copy_lucky']} 条复制粘贴的口令弹幕带福袋提示词，例如「{(s.get('top_copies') or [''])[0][:30]}」")
+        return Attribution(ev.event_id, "lucky_bag", 0.75, ev_lines)
+
     if any(x["type"] == "pk" for x in specials):
         ev_lines.append("异常时段内有 PK 消息")
         return Attribution(ev.event_id, "pk", 0.8, ev_lines)
@@ -52,12 +57,17 @@ def attribute(ev: HeatEvent, room: Room, cfg: Dict[str, Any]) -> Attribution:
         ev_lines.append(f"礼物里最大一位用户占 {s['gift_top1_share']:.0%}，弹幕没有同步放量")
         return Attribution(ev.event_id, "single_user_gift", 0.85, ev_lines)
 
-    if s["text_unique_ratio"] < float(a["spam_unique_ratio"]) and s["laugh_ratio"] < float(a["content_laugh_ratio"]):
+    no_laugh = s["laugh_ratio"] < float(a["content_laugh_ratio"])
+    if s.get("copy_ratio", 0) >= float(a.get("spam_copy_ratio", 0.5)) and no_laugh:
+        ev_lines.append(f"复制粘贴的串占弹幕 {s['copy_ratio']:.0%}，例如「{(s.get('top_copies') or [''])[0][:30]}」")
+        return Attribution(ev.event_id, "chat_spam", 0.7, ev_lines)
+    if s["text_unique_ratio"] < float(a["spam_unique_ratio"]) and no_laugh:
         ev_lines.append(f"弹幕大量重复（不同文本占比 {s['text_unique_ratio']}），没有笑点词")
         return Attribution(ev.event_id, "chat_spam", 0.6, ev_lines)
 
     if s["laugh_ratio"] >= float(a["content_laugh_ratio"]):
-        ev_lines.append(f"{s['chat_users']} 位不同用户发弹幕，笑点/惊讶词占比 {s['laugh_ratio']:.0%}")
+        ev_lines.append(f"{s['chat_users']} 位不同用户发弹幕，笑点/惊讶词占比 {s['laugh_ratio']:.0%}"
+                        f"（已排除复制粘贴的串，串占 {s.get('copy_ratio', 0):.0%}）")
         ev_lines.append("排除：异常前后没有福袋/红包/PK 消息，不在开播期，礼物不集中在一人")
         conf = min(0.95, 0.5 + s["laugh_ratio"])
         return Attribution(ev.event_id, "content", round(conf, 2), ev_lines)

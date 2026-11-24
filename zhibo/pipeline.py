@@ -83,6 +83,11 @@ def run_pipeline(cfg: Dict[str, Any], dataset_dir: Path, out_dir: Path) -> Dict[
             ))
             return
         p = backtrack.plan(ev, rec, rec_bounds(rec), cfg)
+        # 候选不能超出这个直播间的数据范围（实测在数据末尾的异常，收尾时间会超出最后一条消息）
+        if room.end_ts is not None and p.end > room.end_ts:
+            p.end, p.end_source = room.end_ts, "data_end"
+        if p.start < room.start_ts:
+            p.start, p.start_source = room.start_ts, "data_start"
         cand = Candidate(
             cand_id=f"{ev.event_id}-c", room_id=ev.room_id, event_id=ev.event_id, cause=attr.cause,
             start=p.start, end=p.end, start_source=p.start_source, end_source=p.end_source,

@@ -107,12 +107,15 @@ class HeatDetector:
         inside = [q for q in pts if q.t >= ep["start"]]
         users: set = set()
         texts: Counter = Counter()
+        reactions: Counter = Counter()
         gifts: Counter = Counter()
         for q in inside:
             users |= q.detail.get("users", set())
             texts.update(q.detail.get("texts", {}))
+            reactions.update(q.detail.get("reaction_texts", q.detail.get("texts", {})))
             gifts.update(q.detail.get("gift_by_user", {}))
         chat = sum(q.chat for q in inside)
+        copies = sum(q.copy for q in inside)
         gift_total = float(sum(gifts.values()))
         top_user_value = max(gifts.values()) if gifts else 0.0
         specials = sorted({(s, q.t) for q in pts for s in q.specials}, key=lambda x: x[1])
@@ -123,7 +126,10 @@ class HeatDetector:
             "chat_users": len(users),
             "text_unique_ratio": round(len(texts) / chat, 3) if chat else 0.0,
             "laugh_ratio": round(sum(q.laugh for q in inside) / chat, 3) if chat else 0.0,
-            "top_texts": [t for t, _ in texts.most_common(5)],
+            "top_texts": [t for t, _ in reactions.most_common(5)],  # 不含复制粘贴的串
+            "copy_ratio": round(copies / chat, 3) if chat else 0.0,
+            "copy_lucky": sum(q.detail.get("copy_lucky", 0) for q in pts),
+            "top_copies": [t for t, _ in (texts - reactions).most_common(3)],
             "gift_total": gift_total,
             "gift_top1_share": round(top_user_value / gift_total, 3) if gift_total else 0.0,
             "specials": [{"type": s, "t": t} for s, t in specials],

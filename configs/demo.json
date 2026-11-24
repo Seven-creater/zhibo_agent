@@ -3,9 +3,13 @@
   "signals": {
     "laugh_words": [
       "哈哈", "笑死", "笑不活", "笑麻", "笑疯", "绷不住", "蚌埠住", "xswl", "草草", "卧槽", "？？", "??", "名场面", "离谱", "太强了",
-      "下饭", "白给", "人机", "菜死", "这都能", "整活", "抽象",
+      "下饭", "白给", "人机", "菜死", "这都能", "整活", "抽象", "搞笑", "乐死", "乐子",
       "[笑哭]", "[捂脸]", "[呲牙]", "[大笑]", "[奸笑]", "🤣", "😂"
-    ]
+    ],
+    "copy_min_len": 10,
+    "copy_min_users": 3,
+    "copy_window_seconds": 60,
+    "lucky_hints": ["福袋", "中一次", "口令", "抽奖"]
   },
   "heat": {
     "channels": ["chat_users", "laugh_users", "likes", "gift"],
@@ -26,7 +30,9 @@
     "start_effect_seconds": 180,
     "single_gift_top1_share": 0.6,
     "content_laugh_ratio": 0.15,
-    "spam_unique_ratio": 0.25
+    "spam_unique_ratio": 0.25,
+    "spam_copy_ratio": 0.5,
+    "lucky_copy_min": 5
   },
   "trigger_causes": ["content"],
   "scheduler": {
