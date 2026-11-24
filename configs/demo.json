@@ -1,0 +1,68 @@
+{
+  "run_name": "system",
+  "signals": {
+    "laugh_words": ["哈哈", "笑死", "绷不住", "卧槽", "？？", "??", "名场面", "离谱", "太强了"]
+  },
+  "heat": {
+    "channels": ["chat_users", "likes", "gift"],
+    "rolling_seconds": 5,
+    "warmup_seconds": 90,
+    "ewma_alpha": 0.01,
+    "z_enter": 4.0,
+    "z_exit": 1.5,
+    "min_seconds": 4,
+    "exit_seconds": 8,
+    "max_seconds": 240,
+    "baseline_update_max_z": 2.0,
+    "std_floor": {"chat_users": 1.0, "likes": 0.5, "gift": 0.8}
+  },
+  "attribution": {
+    "enabled": true,
+    "special_lookback_seconds": 30,
+    "start_effect_seconds": 180,
+    "single_gift_top1_share": 0.6,
+    "content_laugh_ratio": 0.15,
+    "spam_unique_ratio": 0.25
+  },
+  "trigger_causes": ["content"],
+  "scheduler": {
+    "policy": "dynamic",
+    "record_budget": 2,
+    "tick_seconds": 15,
+    "hysteresis": 1.2,
+    "heat_weight": 0.4,
+    "heat_cap": 10,
+    "heat_smooth_alpha": 0.1,
+    "ring_buffer_seconds": 600
+  },
+  "backtrack": {
+    "signal_lag_seconds": 9,
+    "preroll_seconds": 2,
+    "postroll_seconds": 2,
+    "snap_before": 6,
+    "snap_after": 3,
+    "min_seconds": 15,
+    "max_seconds": 90,
+    "silence_noise_db": -30,
+    "silence_min_seconds": 0.3,
+    "duplicate_overlap": 0.5
+  },
+  "judge": {
+    "kind": "mock",
+    "budget": 20,
+    "max_revisions": 2,
+    "mock_min_laugh_ratio": 0.15,
+    "frames": 3
+  },
+  "ledger": {
+    "path": "state/ledger.jsonl",
+    "replay_only": false
+  },
+  "render": {
+    "enabled": true,
+    "duration_tolerance": 0.5
+  },
+  "eval": {
+    "min_gold_coverage": 0.5
+  }
+}

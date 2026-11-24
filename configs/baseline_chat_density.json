@@ -1,0 +1,9 @@
+{
+  "extends": "demo.json",
+  "run_name": "baseline_chat_density",
+  "heat": {"channels": ["chat_users"]},
+  "attribution": {"enabled": false},
+  "scheduler": {"policy": "fixed"},
+  "judge": {"kind": "accept_all"},
+  "render": {"enabled": false}
+}
