@@ -83,15 +83,33 @@ def resolve_live_room(sec_uid: str) -> Optional[str]:
     return (_reflow(sec_uid).get("owner") or {}).get("web_rid")
 
 
-# 清晰度：FULL_HD1=超清(_uhd)，HD1=高清(_hd)，SD2=标清(_sd)，SD1=流畅(_ld)。
-# 实测（Gus 直播间）：HD1 720p 约 2.9 GB/时，SD2 720p 约 1.0 GB/时，SD1 540p 约 0.5 GB/时；
-# 播放器默认拉的原画可达约 9 GB/时。
-QUALITY_ORDER = ["SD2", "SD1", "HD1", "FULL_HD1"]
+# 清晰度（接口 resolution_name 的叫法）：ORIGIN=原画，FULL_HD1=蓝光，HD1=超清，SD2=高清，SD1=标清。
+# 原画不在 flv_pull_url 里，在 live_core_sdk_data.pull_data.stream_data 的 origin 项。
+# 2026-11-24 实测（一个游戏直播间，各录 20 秒）：原画 1920x1080 60 帧约 6.2 Mbps（2.8 GB/时）；
+# 超清 1280x720 60 帧约 2.9 GB/时；高清 1280x720 30 帧约 1.0 GB/时；纯音频（ao）约 0.09 GB/时。
+# 码率随主播的推流设置变化，原画在别的直播间可能到 7～9 GB/时。
+QUALITY_ORDER = ["ORIGIN", "FULL_HD1", "HD1", "SD2", "SD1"]  # 从高到低
+
+
+def _sdk_streams(room: Dict[str, Any]) -> Dict[str, str]:
+    """live_core_sdk_data 里各档的 flv 地址：origin、uhd、hd、sd、ld、md、ao（纯音频）。"""
+    raw = (((room.get("stream_url") or {}).get("live_core_sdk_data") or {}).get("pull_data") or {}).get("stream_data")
+    try:
+        data = json.loads(raw)["data"] if raw else {}
+    except (ValueError, KeyError, TypeError):
+        return {}
+    return {k: (v.get("main") or {}).get("flv") for k, v in data.items() if (v.get("main") or {}).get("flv")}
 
 
 def quality_stream_url(sec_uid: str, quality: str) -> Optional[str]:
-    flv = ((_reflow(sec_uid).get("stream_url") or {}).get("flv_pull_url")) or {}
-    for q in [quality] + [q for q in QUALITY_ORDER if q != quality]:
+    """按指定清晰度取流；没有这一档就先往低找、再往高找。"""
+    room = _reflow(sec_uid)
+    flv = dict(((room.get("stream_url") or {}).get("flv_pull_url")) or {})
+    origin = _sdk_streams(room).get("origin")
+    if origin:
+        flv["ORIGIN"] = origin
+    i = QUALITY_ORDER.index(quality) if quality in QUALITY_ORDER else 0
+    for q in QUALITY_ORDER[i:] + QUALITY_ORDER[:i][::-1]:
         if flv.get(q):
             return flv[q]
     return next(iter(flv.values()), None)
@@ -174,24 +192,40 @@ class Recorder(threading.Thread):
     SEG_SECONDS = 10
 
     def __init__(self, hub: Hub, room_id: str, out_dir: Path, stop: threading.Event, log,
-                 sec_uid: Optional[str] = None, quality: str = "SD2", min_free_gb: float = 15.0,
+                 sec_uid: Optional[str] = None, quality: str = "ORIGIN", min_free_gb: float = 15.0,
                  keep_seconds: Optional[float] = None):
         super().__init__(daemon=True)
         self.hub, self.room_id, self.dir, self.stop, self.log = hub, room_id, out_dir, stop, log
         self.sec_uid, self.quality, self.min_free_gb = sec_uid, quality, min_free_gb
         self.keep_seconds = keep_seconds
         self.segments: List[Dict[str, Any]] = []  # {path, start, end, deleted}
-        self.pins: List[List[float]] = []
+        self.pins: Dict[int, List[float]] = {}
+        self._pin_lock = threading.Lock()
+        self._pin_seq = 0
         self.proc: Optional[subprocess.Popen] = None
         self.live = False
         self.disk_full = False
         self.deleted_bytes = 0
 
-    def pin(self, start: float, end: float) -> None:
-        self.pins.append([start, end])
+    def pin(self, start: float, end: float = float("inf")) -> int:
+        """标记一段要保留，返回编号；end 不给就是"先占住、还没定终点"。"""
+        with self._pin_lock:
+            self._pin_seq += 1
+            self.pins[self._pin_seq] = [start, end]
+            return self._pin_seq
+
+    def set_pin(self, pid: int, start: float, end: float) -> None:
+        with self._pin_lock:
+            self.pins[pid] = [start, end]
+
+    def unpin(self, pid: int) -> None:
+        with self._pin_lock:
+            self.pins.pop(pid, None)
 
     def _pinned(self, a: float, b: float) -> bool:
-        return any(a < pe and ps < b for ps, pe in list(self.pins))
+        with self._pin_lock:
+            spans = list(self.pins.values())
+        return any(a < pe and ps < b for ps, pe in spans)
 
     def _free_gb(self) -> float:
         return shutil.disk_usage(self.dir).free / 1e9
@@ -317,15 +351,19 @@ class Recorder(threading.Thread):
 
 class Collector:
     def __init__(self, rooms: List[Dict[str, Optional[str]]], out: Path, hub: Hub, salt: str, cfg: Dict[str, Any],
-                 quality: str = "SD2", min_free_gb: float = 15.0, full_record: bool = False):
+                 quality: str = "ORIGIN", min_free_gb: float = 15.0, full_record: bool = False):
         self.out, self.hub, self.salt, self.cfg = out, hub, salt, cfg
         self.quality, self.min_free_gb = quality, min_free_gb
         live = cfg.get("live", {})
         self.pin_causes = set(live.get("pin_causes", ["content"]))
         self.pin_pre = float(live.get("pin_pre_seconds", 60))
         self.pin_post = float(live.get("pin_post_seconds", 20))
-        # 缓冲要盖住"异常最长持续时间 + 往前多留的时间 + 余量"，否则检测出来时前因已经被删了
-        self.keep_seconds = None if full_record else float(cfg["heat"]["max_seconds"]) + self.pin_pre + 60
+        # 即时重放：确认异常结束后，从确认时刻往回存 replay_seconds 秒（异常本身更长时从异常开始前 pin_pre 秒起存）。
+        # 异常一开始就先占住"开始时刻往前 replay_seconds 秒起"的录像，等结束、归因完再定稿或释放，
+        # 所以缓冲只要盖住 replay_seconds 加上检测延迟的余量，和异常持续多久无关。
+        self.replay = float(live.get("replay_seconds", 300))
+        self.keep_seconds = None if full_record else self.replay + 60
+        self.held: Dict[str, int] = {}  # 直播间 → 正在占住的保留编号
         self.q: "queue.Queue" = queue.Queue()
         self.triggers: List[Dict[str, Any]] = []
         self.anomalies = 0
@@ -423,6 +461,10 @@ class Collector:
 
         def tick(rid: str, t: int) -> None:
             _, ev = dets[rid].update(aggs[rid].close(float(t)))
+            opened = dets[rid].pop_opened()
+            if opened is not None and rid in self.recorders:
+                # 先占住，免得等"确认结束"的这段时间里，前面的录像被环形缓冲删掉
+                self.held[rid] = self.recorders[rid].pin(opened - self.replay)
             if ev:
                 self._on_event(ev)
 
@@ -458,11 +500,18 @@ class Collector:
         keep = attr.cause in self.pin_causes
         msg = (f"[{'触发' if keep else '异常'}] {info['anchor']} {hhmm} 起 {ev.end - ev.start:.0f} 秒，"
                f"{CAUSE_ZH.get(attr.cause, attr.cause)}，{ev.channel} z={ev.peak_z}")
+        rec, held = self.recorders.get(ev.room_id), self.held.pop(ev.room_id, None)
         if keep:
-            a, b = ev.start - self.pin_pre, ev.end + self.pin_post
-            self.recorders[ev.room_id].pin(a, b)
+            # 即时重放：从"确认结束"的时刻往回存 replay 秒；异常本身更长时从异常开始前 pin_pre 秒起存
+            a = min(ev.closed_at - self.replay, ev.start - self.pin_pre)
+            b = max(ev.closed_at, ev.end + self.pin_post)
+            if rec is not None:
+                if held is not None:
+                    rec.set_pin(held, a, b)
+                else:
+                    rec.pin(a, b)
             row = {"room_id": ev.room_id, "anchor": info["anchor"], "keep_start": round(a, 3), "keep_end": round(b, 3),
-                   "event": {"start": ev.start, "peak": ev.peak, "end": ev.end, "channel": ev.channel, "peak_z": ev.peak_z,
+                   "event": {"start": ev.start, "peak": ev.peak, "end": ev.end, "confirmed_at": ev.closed_at, "channel": ev.channel, "peak_z": ev.peak_z,
                              "top_texts": ev.stats.get("top_texts")},
                    "cause": attr.cause, "evidence": attr.evidence}
             self.triggers.append(row)
@@ -471,6 +520,8 @@ class Collector:
             msg += f"，保留录像 {time.strftime('%H:%M:%S', time.localtime(a))}–{time.strftime('%H:%M:%S', time.localtime(b))}"
             msg += f"；弹幕：{'、'.join((ev.stats.get('top_texts') or [])[:3])[:40]}"
         else:
+            if rec is not None and held is not None:
+                rec.unpin(held)  # 不是搞笑：释放先占住的录像，交还环形缓冲
             msg += "，不保留录像"
         self.log(msg)
 
@@ -512,7 +563,7 @@ class Collector:
         deadline = time.time() + hours * 3600
         threading.Thread(target=lambda: (self.stop.wait(max(0, deadline - time.time())), self.stop.set()), daemon=True).start()
         mode = ("全程录制" if self.keep_seconds is None else
-                f"环形缓冲（只保留最近 {self.keep_seconds / 60:.1f} 分钟，触发后保留异常前 {self.pin_pre:.0f} 秒到结束后 {self.pin_post:.0f} 秒）")
+                f"环形缓冲（只保留最近 {self.keep_seconds / 60:.1f} 分钟；确认搞笑异常结束后往回存 {self.replay / 60:.0f} 分钟）")
         self.log(f"开始采集：{len(self.rooms)} 个直播间，另有 {len(self.pending)} 位主播等待开播；"
                  f"最长 {hours} 小时，Ctrl+C 结束。录制方式：{mode}。输出：{self.out}")
         try:

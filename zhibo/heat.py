@@ -2,6 +2,10 @@
 
 做法（demo 版）：几路信号各取最近 N 秒的滚动和，和自己的 EWMA 基线比 z 值；
 z 连续几秒超过进入阈值就开一段异常，连续几秒低于退出阈值就结束。
+
+收尾看哪几路由 heat.exit_channels 决定（"dominant" 表示这次异常的主导信号）：
+要这几路**同时**低于退出阈值、并且连续 exit_seconds 秒，才算结束；中途任一路再起来，计数清零，
+算同一次异常（参考 frigate 的 cutoff_time：最后一次活动后静默 40 秒才结束告警）。
 """
 from __future__ import annotations
 
@@ -33,6 +37,8 @@ class HeatDetector:
         self.above = 0
         self.below = 0
         self.ep: Optional[Dict[str, Any]] = None
+        self.exit_channels: List[str] = list(h.get("exit_channels", ["dominant"]))
+        self._opened: Optional[float] = None  # 刚开的异常的开始时刻，给实时录制"先占住"用
         self.z_smooth = 0.0  # 给调度用的平滑热度
         self.smooth_alpha = float(cfg["scheduler"]["heat_smooth_alpha"])
         self._seq = 0
@@ -75,8 +81,10 @@ class HeatDetector:
                     self._update_baseline(xs)
             if self.above >= int(self.cfg["min_seconds"]):
                 start = p.t - (self.above - 1)
-                self.ep = {"start": start, "peak": p.t, "peak_z": zmax, "channel": ch, "peaks": dict(zs)}
+                self.ep = {"start": start, "peak": p.t, "peak_z": zmax, "channel": ch, "peaks": dict(zs),
+                           "laugh_best": (zs.get("laugh_users", float("-inf")), p.t)}
                 self.above = 0
+                self._opened = start
             return zmax, None
 
         ep = self.ep
@@ -84,13 +92,22 @@ class HeatDetector:
             ep.update(peak=p.t, peak_z=zmax, channel=ch)
         for c, z in zs.items():
             ep["peaks"][c] = max(ep["peaks"].get(c, z), z)
-        # 收尾只看主导信号：几路信号取最大值的话，任一路的噪声都会让异常拖着不结束
-        self.below = self.below + 1 if zs[ep["channel"]] < self.cfg["z_exit"] else 0
+        if zs.get("laugh_users", float("-inf")) > ep["laugh_best"][0]:
+            ep["laugh_best"] = (zs["laugh_users"], p.t)  # 整段里笑点最集中的时刻
+        # 收尾只看指定的几路（默认只看主导信号）：几路信号取最大值的话，任一路的噪声都会让异常拖着不结束
+        watch = {ep["channel"] if c == "dominant" else c for c in self.exit_channels}
+        quiet = all(zs[c] < self.cfg["z_exit"] for c in watch if c in zs)
+        self.below = self.below + 1 if quiet else 0
         too_long = p.t - ep["start"] >= int(self.cfg["max_seconds"])
         if self.below >= int(self.cfg["exit_seconds"]) or too_long:
             end = p.t - self.below + 1 if not too_long else p.t
             return zmax, self._close(end, p.t)
         return zmax, None
+
+    def pop_opened(self) -> Optional[float]:
+        """上一次 update 里开了新异常就返回它的开始时刻（只返回一次）。"""
+        t, self._opened = self._opened, None
+        return t
 
     def flush(self, now: float) -> Optional[HeatEvent]:
         """直播结束时把还开着的异常收尾。"""
@@ -120,6 +137,13 @@ class HeatDetector:
         top_user_value = max(gifts.values()) if gifts else 0.0
         specials = sorted({(s, q.t) for q in pts for s in q.specials}, key=lambda x: x[1])
         duration = end - ep["start"]
+        # 几波反应合并成一次异常后，整段的笑点占比会被不好笑的那几波稀释；
+        # 单独看笑点最集中那一刻前后的占比，归因时用来判断"里面有没有一段真笑点"
+        lz, lt = ep["laugh_best"]
+        near = [q for q in inside if lt - 20 <= q.t <= lt + 10]
+        near_chat = sum(q.chat for q in near)
+        laugh_burst = {"t": lt, "z": round(lz, 2) if lz != float("-inf") else None,
+                       "ratio": round(sum(q.laugh for q in near) / near_chat, 3) if near_chat else 0.0}
         stats = {
             "duration": duration,
             "chat": chat,
@@ -134,6 +158,7 @@ class HeatDetector:
             "gift_top1_share": round(top_user_value / gift_total, 3) if gift_total else 0.0,
             "specials": [{"type": s, "t": t} for s, t in specials],
             "peak_z_by_channel": {c: round(z, 2) for c, z in ep["peaks"].items()},
+            "laugh_burst": laugh_burst,
         }
         return HeatEvent(
             event_id=f"{self.room_id}-ev{self._seq:03d}",

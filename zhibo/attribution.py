@@ -57,6 +57,16 @@ def attribute(ev: HeatEvent, room: Room, cfg: Dict[str, Any]) -> Attribution:
         ev_lines.append(f"礼物里最大一位用户占 {s['gift_top1_share']:.0%}，弹幕没有同步放量")
         return Attribution(ev.event_id, "single_user_gift", 0.85, ev_lines)
 
+    # 合并后的长异常里有一段笑点爆发：笑点信号本身过了进入阈值，前后 30 秒笑点占比也够（2026-11-24 实测）
+    lb = s.get("laugh_burst") or {}
+    burst = (lb.get("z") is not None and lb["z"] >= float(cfg["heat"]["z_enter"])
+             and lb.get("ratio", 0) >= float(a["content_laugh_ratio"]))
+    if burst and s["laugh_ratio"] < float(a["content_laugh_ratio"]) and ev.channel != "laugh_users":
+        ev_lines.append(f"整段笑点占比只有 {s['laugh_ratio']:.0%}，但 +{lb['t'] - room.start_ts:.0f}s 前后有一段笑点爆发"
+                        f"（笑点信号 z={lb['z']}，前后 30 秒笑点占比 {lb['ratio']:.0%}），其余是其他弹幕高峰")
+        ev_lines.append("排除：异常前后没有福袋/红包/PK 消息，不在开播期，礼物不集中在一人")
+        return Attribution(ev.event_id, "content", round(min(0.9, 0.4 + lb["ratio"]), 2), ev_lines)
+
     no_laugh = s["laugh_ratio"] < float(a["content_laugh_ratio"])
     if s.get("copy_ratio", 0) >= float(a.get("spam_copy_ratio", 0.5)) and no_laugh:
         ev_lines.append(f"复制粘贴的串占弹幕 {s['copy_ratio']:.0%}，例如「{(s.get('top_copies') or [''])[0][:30]}」")

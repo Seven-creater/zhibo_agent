@@ -11,7 +11,16 @@
     "pin_causes": [
       "content"
     ],
+    "replay_seconds": 300,
     "pin_pre_seconds": 60,
     "pin_post_seconds": 20
+  },
+  "heat": {
+    "exit_channels": [
+      "dominant",
+      "laugh_users"
+    ],
+    "exit_seconds": 40,
+    "max_seconds": 300
   }
 }
