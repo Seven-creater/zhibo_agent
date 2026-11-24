@@ -3,5 +3,26 @@
   "run_name": "fused",
   "heat": {
     "kind": "fused"
+  },
+  "judge": {
+    "evidence": "v2",
+    "frames": 1,
+    "segment_min_seconds": 8,
+    "sheets_max": 4,
+    "window_snap_seconds": 5,
+    "target_seconds": "10～20",
+    "clip_min_seconds": 8,
+    "clip_max_seconds": 25,
+    "max_sentence_gap": 4,
+    "cut_pre_seconds": 0.5,
+    "cut_tail_seconds": 2,
+    "min_funny_score": 8,
+    "adjacent_gap_seconds": 10,
+    "taste": [
+      "合格的例子：主播想说 angry 却说成 hungry，自己没发现，弹幕集体纠正——口误或翻车，包袱明确，十几秒就讲完了。",
+      "不合格：正常的游戏交流、喊队友、解说战况、聊游戏版本，哪怕弹幕在刷笑；主播事后解释或承认刚才的梗（第二遍就不好笑了）。",
+      "如果好笑的只是主播的笑声本身（笑得很魔性），只留笑声和它前面的一句，前面不好笑的对话都不要。",
+      "宁缺毋滥：一场直播能出两三条真正好笑的就够了。"
+    ]
   }
 }

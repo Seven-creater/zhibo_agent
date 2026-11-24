@@ -42,6 +42,32 @@ def _segments(start: float, end: float, bounds: List[float], min_len: float = 8.
     ]
 
 
+def plan_window(a: float, b: float, rec: Recording, bounds: List[float], sentence: List[float],
+                cfg: Dict[str, Any]) -> Plan:
+    """证据包第 2 版的宽窗口：[a, b] 由即时重放策略给出（act/replay.py），起点往前、终点往后吸附到最近的边界，
+    再按边界切成至少 segment_min_seconds 秒的小段。sentence 里的边界来源记为 sentence，其余记为 silence。"""
+    snap = float(cfg["judge"].get("window_snap_seconds", 5))
+    sent = set(sentence)
+
+    def pick(want: float, before: bool) -> Tuple[float, str]:
+        lo, hi = (want - snap, want) if before else (want, want + snap)
+        near = [x for x in bounds if lo <= x <= hi]
+        if not near:
+            return want, "replay_window"
+        x = max(near) if before else min(near)
+        return x, "sentence" if x in sent else "silence"
+
+    start, s_src = pick(a, True)
+    end, e_src = pick(b, False)
+    rec_end = rec.start_ts + rec.duration
+    if start < rec.start_ts:
+        start, s_src = rec.start_ts, "recording_start"
+    if end > rec_end:
+        end, e_src = rec_end, "recording_end"
+    segs = _segments(start, end, bounds, float(cfg["judge"].get("segment_min_seconds", 8)))
+    return Plan(round(start, 3), round(end, 3), s_src, e_src, segs)
+
+
 def plan(ev: HeatEvent, rec: Recording, bounds: List[float], cfg: Dict[str, Any]) -> Plan:
     b = cfg["backtrack"]
     lo, hi = float(b["snap_before"]), float(b["snap_after"])

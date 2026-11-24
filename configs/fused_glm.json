@@ -1,0 +1,9 @@
+{
+  "extends": "fused.json",
+  "run_name": "fused_glm",
+  "judge": {
+    "kind": "glm",
+    "budget": 10,
+    "max_tokens": 8000
+  }
+}

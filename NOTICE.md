@@ -10,6 +10,7 @@
 | `zhibo/perceive/audio.py`（dBFS 算法） | [frigate](https://github.com/blakeblackshear/frigate) `frigate/events/audio.py` | `d20d6dc` | MIT | 参照算法 |
 | `zhibo/perceive/speech.py` | [sherpa-onnx](https://github.com/k2-fsa/sherpa-onnx) `python-api-examples/simulate-streaming-sense-voice-microphone.py`（Copyright (c) 2025 Xiaomi Corporation） | 2.0.3 版发布时的示例 | Apache-2.0 | 改写：输入从麦克风换成样本流，参数按直播调整 |
 | `zhibo/detect/fuse.py` | [hotclip](https://github.com/xixihhhh/hotclip) `src/core/highlight/moments.ts` 的按品类加权（`MOMENT_WEIGHTS.reaction`）、共振加成（`MOMENT_AGREEMENT_BONUS`）、饱和降权（`MOMENT_SATURATION`） | `3543584` | AGPL-3.0 | 思路和常数改写成 Python，用在逐秒的实时融合上 |
+| `zhibo/edit/evidence.py` | clips-studio `ARCHITECTURE.md` 4.4 节"把信号写成事件时间线文字给模型"；hotclip `src/core/highlight/vision.ts` 的九宫格拼图 | `bd39d8b`；`3543584` | AGPL-3.0 | 思路改写成 Python |
 | `zhibo/perceive/tagger.py` | sherpa-onnx `python-api-examples/audio-tagging-from-a-file.py`；frigate `frigate/events/audio.py` 的"过音量门槛才分类、按类别设阈值" | 同上；`d20d6dc` | Apache-2.0；MIT | 参照调用方式和做法 |
 
 ## 作为外部程序或库使用
@@ -31,4 +32,4 @@
 
 ## 借鉴了思路、还没复用代码的项目
 
-hotclip（AGPL-3.0，`3543584`）的九宫格；clips-studio 的事件时间线和排序；frigate 的 `cutoff_time`（EVO-012 的结束规则）。真正复用到代码时再补进上面的表。
+clips-studio 的候选排序（rerank）；frigate 的 `cutoff_time`（EVO-012 的结束规则）。真正复用到代码时再补进上面的表。

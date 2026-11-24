@@ -103,6 +103,15 @@ class Scheduler:
             return False, f"录制比候选起点晚 {rec_from - start:.0f} 秒才开始，前因没录到"
         return False, "这段时间没有在录这个直播间"
 
+    def clamp_start(self, room_id: str, start: float, end: float, now: float) -> float:
+        """宽窗口的起点如果早于录像（或环形缓冲）的开头，挪到开头。宽窗口本来就留足了余量，挪一点不算丢前因。"""
+        spans = list(self.intervals.get(room_id, []))
+        if room_id in self.recording:
+            spans.append((self.recording[room_id], now))
+        rec_from = max((a for a, b in spans if a <= end), default=None)
+        lo = now - float(self.cfg["ring_buffer_seconds"])
+        return max(start, lo, rec_from if rec_from is not None else start)
+
     def recorded_at(self, room_id: str, t: float) -> bool:
         return any(a <= t < b for a, b in self.intervals.get(room_id, []))
 

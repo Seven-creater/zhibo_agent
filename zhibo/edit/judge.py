@@ -27,6 +27,13 @@ OUTPUT_SPEC = {
     "structure": {"setup": ["段号"], "climax": ["段号"], "reaction": ["段号"]},
     "title": "建议标题",
 }
+# 证据包第 2 版多一个 cut：最精简版本从第几句到第几句（句号见提示里主播原话前的 [n]），切点由程序按句子起止算
+# 第 2 版提示的修订号：改了 prompt_v2() 的写法就改这里。它放进请求里，所以提示一改账本就会重新调用
+PROMPT_REV_V2 = "2026-11-24d"
+OUTPUT_SPEC_V2 = {"event": "一句话说发生了什么", "punchline": "笑点到底是什么（说不清就是没有）", "funny_score": 8,
+                  "worth_clipping": True, "reason": "值不值得切的理由",
+                  "structure": {"setup": ["段号"], "climax": ["段号"], "reaction": ["段号"]},
+                  "cut": {"from": 12, "to": 18}, "key_quote": "笑点那句主播原话（从上面照抄）", "title": "建议标题"}
 
 
 class MockJudge:
@@ -45,7 +52,16 @@ class MockJudge:
         climax = [s["id"] for s in segs if s["id"] not in setup and s["start"] <= peak + 3] or [segs[-1]["id"]]
         reaction = [s["id"] for s in segs if s["id"] not in setup and s["id"] not in climax]
         worth = request["attribution"]["cause"] == "content" and ev["laugh_ratio"] >= self.min_laugh
+        # 证据包第 2 版带声音证据：主播笑、观众也有笑点弹幕，也算（模拟判定器只用来跑通流程）
+        laugh = ((ev.get("audio_peaks") or {}).get("laugh") or {}).get("value", 0)
+        if request.get("version") == 2 and request["attribution"]["cause"] == "content" and laugh >= 0.4 \
+                and ev["laugh_ratio"] >= 0.05:
+            worth = True
         top = "、".join(ev["top_texts"][:3])
+        cut = None
+        if request.get("sentence_count"):  # 模拟精剪：取高潮那几段里的句子
+            nums = [int(n) for s_ in segs if s_["id"] in climax for n in re.findall(r"\[(\d+)\]", s_.get("said", ""))]
+            cut = {"from": min(nums), "to": max(nums)} if nums else {"from": 1, "to": 1}
         out = {
             "event": f"观众集中刷「{top}」，{ev['chat_users']} 人参与",
             "worth_clipping": worth,
@@ -54,6 +70,12 @@ class MockJudge:
             "structure": {"setup": setup, "climax": climax, "reaction": reaction},
             "title": f"【{request['room']['anchor']}】{ev['top_texts'][0] if ev['top_texts'] else '高光'}",
         }
+        if cut:
+            out["cut"] = cut
+        if request.get("sentence_count"):
+            out["funny_score"] = 8 if worth else 3
+            out["punchline"] = out["event"]
+            out["key_quote"] = ""  # 模拟判定器不核对原话
         return json.dumps(out, ensure_ascii=False)
 
 
@@ -101,10 +123,71 @@ class GLMJudge:
         self.max_tokens = int(cfg.get("max_tokens", 4000))
         self.thinking_budget = int(cfg.get("thinking_budget", 1200))
         self.timeout = float(cfg.get("timeout", 180))
+        self.retry_max_tokens = int(cfg.get("retry_max_tokens", 16000))
         self.base_dir = Path(".")  # 由主流程设成本次运行的输出目录，截图路径相对于它
 
     @staticmethod
+    def prompt_v2(request: Dict[str, Any]) -> str:
+        """证据包第 2 版：每段有主播原话、声音事件、弹幕；截图是九宫格。"""
+        room = request["room"]
+        ev = request["evidence"]
+        n_sheets = len(ev.get("frames", []))
+        lines = [
+            f"你在帮一个抖音直播切片账号找搞笑片段。主播：{room['anchor']}，品类：{room['category']}。",
+            "下面是直播里的一段（约几分钟），已经按主播说话的句子停顿切成编号小段 S1、S2……。每段给出：时间（秒，相对开头）、"
+            "主播这段说了什么（语音自动转写，可能有错字）、声音里发生了什么、观众弹幕（已经按观众的反应延迟对齐到这一段）。",
+            f"另附 {n_sheets} 张九宫格截图：每张 3×3，从左到右、从上到下依次对应 9 个段（第 1 张是 S1～S9，第 2 张是 S10～S18，以此类推），"
+            "每格是那一段中间时刻的画面。",
+            f"系统初步判断这次热度上升的原因是：{CAUSE_ZH.get(request['attribution']['cause'], request['attribution']['cause'])}"
+            f"（{'；'.join(request['attribution']['evidence'])}）。",
+            "",
+        ]
+        for seg in request["segments"]:
+            parts = [f"{seg['id']}：{seg['start']:.0f}–{seg['end']:.0f} 秒"]
+            parts.append(f"主播：{seg.get('said') or '（没说话）'}")
+            if seg.get("events"):
+                parts.append("声音：" + "、".join(seg["events"]))
+            texts = "、".join(seg.get("chats") or [])
+            parts.append(f"弹幕 {seg.get('chat_count', 0)} 条" + (f"：{texts}" if texts else ""))
+            lines.append("；".join(parts))
+        taste = request.get("taste") or []
+        done = request.get("already_clipped") or []
+        if done:
+            lines.append("这个直播间刚才已经切过下面这些笑点。如果这段的笑点就是其中之一（包括观众还在继续刷那个梗），"
+                         "worth_clipping 填 false：")
+            lines += [f"- {d}" for d in done]
+        lines += [
+            "",
+            "请判断：这段里有没有一个**陌生人不看直播上下文、刷到也会笑**的搞笑场面。要求很严：大多数直播片段都不合格。",
+            "先在 punchline 里用一句话说清笑点到底是什么（谁、做了/说了什么、为什么好笑）；说不清就是没有。",
+            "再给 funny_score 打 1～10 分：9～10 一看就笑、有明确的包袱；7～8 好笑但要一点上下文；6 分及以下都不要。"
+            "弹幕在刷「哈哈」「？」只说明直播间的观众有反应，不等于片段本身好笑；正常的游戏交流、解说、聊天、玩梗互动都不算。",
+        ]
+        if taste:
+            lines.append("这个账号的审核人看过之前的片段，口味如下，请照着判：")
+            lines += [f"- {t}" for t in taste]
+        lines += [
+            "如果合格，在 structure 里指出铺垫、高潮、观众反应各是哪几段；",
+            f"再在 cut 里给出最精简的版本：从第几句到第几句（主播原话前方括号里的句号）。cut 的目标是 {request.get('target_seconds', '15～30')} 秒："
+            "只留让人看懂所需的一两句铺垫和笑点本身，宁短勿长；cut 的最后一句就是笑点那一句，"
+            "不要为了留观众反应去多选后面的句子（程序会在最后一句后自动多留 2 秒）。"
+            "key_quote 照抄 cut 范围里笑点那句主播原话（可以只抄关键的一部分）；如果笑点是笑声本身，写（笑声）。"
+            "注意：弹幕比画面晚，后面几段弹幕还在刷的梗，笑点往往已经在前面说完了；cut 必须选到笑点真正说出来的那几句。"
+            "主播原话后面标了（笑声）的，表示那句话期间或紧接着有笑声；如果好笑的只是笑声本身，cut 只选笑声前一句和带笑声的那句。"
+            "程序会在最后一句之后把紧接着的笑声留完。",
+            "如果只是福袋、抽奖、刷礼物、复制粘贴的弹幕刷屏、单纯聊天，或者说不清笑点，worth_clipping 填 false。",
+            "只输出一个 JSON 对象，不要其他文字。worth_clipping 是布尔值 true 或 false（不加引号），funny_score 是整数。格式示例：",
+            json.dumps(OUTPUT_SPEC_V2, ensure_ascii=False),
+            "段号、句号都只能用上面列出的，不要输出时间戳。",
+        ]
+        if request.get("feedback"):
+            lines += ["", request["feedback"]]
+        return "\n".join(lines)
+
+    @staticmethod
     def prompt(request: Dict[str, Any]) -> str:
+        if request.get("version") == 2:
+            return GLMJudge.prompt_v2(request)
         room = request["room"]
         lines = [
             f"你在帮一个抖音直播切片账号找搞笑片段。主播：{room['anchor']}，品类：{room['category']}。",
@@ -131,14 +214,14 @@ class GLMJudge:
             lines += ["", request["feedback"]]
         return "\n".join(lines)
 
-    def body(self, request: Dict[str, Any]) -> Dict[str, Any]:
+    def body(self, request: Dict[str, Any], max_tokens: Optional[int] = None) -> Dict[str, Any]:
         blocks: List[Dict[str, Any]] = [{"type": "text", "text": self.prompt(request)}]
         for rel in request["evidence"].get("frames", []):
             data = base64.b64encode((self.base_dir / rel).read_bytes()).decode("ascii")
             blocks.append({"type": "image", "source": {"type": "base64", "media_type": "image/jpeg", "data": data}})
         return {
             "model": self.model,
-            "max_tokens": self.max_tokens,
+            "max_tokens": max_tokens or self.max_tokens,
             # glm-5.3-flash 是思考型模型，不封顶思考预算时可能把 max_tokens 吃光、正文为空（hunter 实测）
             "thinking": {"type": "enabled", "budget_tokens": self.thinking_budget},
             "messages": [{"role": "user", "content": blocks}],
@@ -147,20 +230,32 @@ class GLMJudge:
     def respond(self, request: Dict[str, Any]) -> str:
         if not self.key:
             raise RuntimeError("缺少 ZHIPU_API_KEY：在项目根目录的 .env 里写一行 ZHIPU_API_KEY=你的密钥")
+        data = self._send(request, self.max_tokens)
+        text = self._text(data)
+        if not text and data.get("stop_reason") == "max_tokens" and self.retry_max_tokens > self.max_tokens:
+            # 思考型模型偶尔不守思考预算，把输出长度全用在思考上、正文为空（2026-11-24 实测：8000 也不够）。
+            # 照 hotclip（detect.ts 的 MAX_TOKENS 4000 / RETRY_MAX_TOKENS 16000）放宽一次长度重试
+            data = self._send(request, self.retry_max_tokens)
+            text = self._text(data)
+        if not text:
+            raise RuntimeError(f"GLM 返回空正文（stop_reason={data.get('stop_reason')}）")
+        return text
+
+    @staticmethod
+    def _text(data: Dict[str, Any]) -> str:
+        return "\n".join(b.get("text", "") for b in data.get("content", []) if b.get("type") == "text").strip()
+
+    def _send(self, request: Dict[str, Any], max_tokens: int) -> Dict[str, Any]:
         req = urllib.request.Request(
-            f"{self.base}/v1/messages", data=json.dumps(self.body(request)).encode("utf-8"), method="POST",
+            f"{self.base}/v1/messages", data=json.dumps(self.body(request, max_tokens)).encode("utf-8"), method="POST",
             headers={"x-api-key": self.key, "Authorization": f"Bearer {self.key}",
                      "anthropic-version": "2023-06-01", "Content-Type": "application/json"},
         )
         try:
             with urllib.request.urlopen(req, timeout=self.timeout) as r:
-                data = json.loads(r.read())
+                return json.loads(r.read())
         except urllib.error.HTTPError as e:
             raise RuntimeError(f"GLM HTTP {e.code}: {e.read()[:300].decode('utf-8', 'replace')}")
-        text = "\n".join(b.get("text", "") for b in data.get("content", []) if b.get("type") == "text").strip()
-        if not text:
-            raise RuntimeError(f"GLM 返回空正文（stop_reason={data.get('stop_reason')}）")
-        return text
 
 
 JUDGES = {"mock": MockJudge, "accept_all": AcceptAllJudge, "glm": GLMJudge}
@@ -170,7 +265,7 @@ def make_judge(cfg: Dict[str, Any]):
     return JUDGES[cfg["kind"]](cfg)
 
 
-def validate(text: Optional[str], segment_ids: List[str]) -> Tuple[Optional[Dict[str, Any]], List[str]]:
+def validate(text: Optional[str], segment_ids: List[str], n_sentences: int = 0) -> Tuple[Optional[Dict[str, Any]], List[str]]:
     if text is None:
         return None, ["没有输出"]
     m = re.search(r"\{.*\}", text, re.S)  # 模型常把 JSON 包在 ```json 代码块里
@@ -191,6 +286,26 @@ def validate(text: Optional[str], segment_ids: List[str]) -> Tuple[Optional[Dict
             for sid in obj["structure"].get(part, []):
                 if sid not in segment_ids:
                     errs.append(f"structure.{part} 里的段号 {sid} 不存在")
+    if n_sentences:  # 证据包第 2 版：要有好笑分（1～10 的整数）
+        try:
+            score = int(obj.get("funny_score"))
+            if not 1 <= score <= 10:
+                raise ValueError
+            obj["funny_score"] = score
+        except (TypeError, ValueError):
+            errs.append("funny_score 要是 1～10 的整数")
+    if n_sentences and obj.get("worth_clipping") is True and not isinstance(obj.get("key_quote"), str):
+        errs.append("值得切时要有 key_quote（笑点那句主播原话，或（笑声））")
+    if n_sentences and obj.get("worth_clipping") is True:  # 证据包第 2 版：值得切时要给精剪的句号范围
+        cut = obj.get("cut")
+        try:
+            a, b = int(cut["from"]), int(cut["to"])
+            if not (1 <= a <= b <= n_sentences):
+                errs.append(f"cut 的句号要满足 1 ≤ from ≤ to ≤ {n_sentences}")
+            else:
+                obj["cut"] = {"from": a, "to": b}
+        except (TypeError, KeyError, ValueError):
+            errs.append("值得切时要有 cut，形如 {\"from\": 句号, \"to\": 句号}")
     return (obj if not errs else None), errs
 
 
@@ -209,7 +324,7 @@ def judge_candidate(judge, ledger: Ledger, request: Dict[str, Any], max_revision
         trail.append(status)
         if status not in ("received", "replayed", "direct"):
             return {"status": "failed", "error": f"账本状态 {status}", "attempts": attempt + 1, "ledger": trail}
-        obj, errs = validate(text, seg_ids)
+        obj, errs = validate(text, seg_ids, int(request.get("sentence_count", 0)))
         if not errs:
             return {"status": "ok", "result": obj, "raw": text, "attempts": attempt + 1, "ledger": trail}
         feedback = "上次输出有问题，请修正：" + "；".join(errs)

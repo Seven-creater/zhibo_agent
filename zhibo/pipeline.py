@@ -20,18 +20,29 @@ from .edit import backtrack
 from .core import media
 from .detect.attribution import attribute
 from .evaluate.evaluate import evaluate
-from .edit.judge import OUTPUT_SPEC, judge_candidate, make_judge
+from .edit.judge import OUTPUT_SPEC, PROMPT_REV_V2, judge_candidate, make_judge
 from .core.ledger import Ledger
 from .core.models import Attribution, Candidate, HeatEvent, write_jsonl
 from .edit.render import render_clip
 from .evaluate.report import write_report
 from .act.scheduler import Scheduler
+from .act.replay import ReplayPolicy
+from .edit import evidence
 from .engine import RoomEngine
 from .ingest.sources import ReplaySource
 
 
 def _overlap(a0: float, a1: float, b0: float, b1: float) -> float:
     return max(0.0, min(a1, b1) - max(a0, b0))
+
+
+def _quote_found(quote: str, text: str) -> float:
+    """模型照抄的原话有多少能在选中的句子里找到：去掉标点空白后，原话里相邻两个字组成的"字对"出现在句子里的比例。"""
+    def grams(s: str) -> set:
+        s = "".join(ch for ch in s.lower() if ch.isalnum())
+        return {s[i:i + 2] for i in range(len(s) - 1)} or ({s} if s else set())
+    q, t = grams(quote), grams(text)
+    return len(q & t) / len(q) if q else 0.0
 
 
 def run_pipeline(cfg: Dict[str, Any], dataset_dir: Path, out_dir: Path) -> Dict[str, Any]:
@@ -46,8 +57,10 @@ def run_pipeline(cfg: Dict[str, Any], dataset_dir: Path, out_dir: Path) -> Dict[
     rooms = {r.room_id: r for r in src.rooms}
     engines = {rid: RoomEngine(rid, cfg) for rid in rooms}
     fused = cfg["heat"].get("kind", "chat_z") == "fused"
-    perception = {rid: src.perception(rid) for rid in rooms} if fused else {}
-    transcripts = {rid: src.transcript(rid) for rid in rooms} if fused else {}
+    v2 = cfg["judge"].get("evidence", "v1") == "v2"  # 证据包第 2 版（edit/evidence.py）
+    perception = {rid: src.perception(rid) for rid in rooms} if fused or v2 else {}
+    transcripts = {rid: src.transcript(rid) for rid in rooms} if fused or v2 else {}
+    policy = ReplayPolicy(cfg)
     lead = float(cfg.get("fuse", {}).get("audio_lead_seconds", 0))
     sched = Scheduler(rooms, cfg)
     b0 = cfg["backtrack"]
@@ -102,7 +115,18 @@ def run_pipeline(cfg: Dict[str, Any], dataset_dir: Path, out_dir: Path) -> Dict[
                 status="lost_not_recording", note="高潮时刻没有录像（录制中断或还没开始）",
             ))
             return
-        p = backtrack.plan(ev, rec, rec_bounds(rec), plan_cfg)
+        if v2:  # 宽窗口 = 实时即时重放会保存的区间，切点吸附到句子停顿（没有逐句稿时退回静音边界）
+            tr = transcripts.get(ev.room_id, [])
+            sent = evidence.sentence_bounds(tr, rec.start_ts, rec.start_ts + rec.duration)
+            a, bb = policy.window(ev)
+            k = int(cfg["judge"].get("sheets_max", 4)) * 9
+            seg_cfg = copy.deepcopy(cfg)
+            p = backtrack.plan_window(a, bb, rec, sorted(set(sent) | set(rec_bounds(rec))), sent, seg_cfg)
+            while len(p.segments) > k:  # 段太多九宫格放不下：加大每段最短时长
+                seg_cfg["judge"]["segment_min_seconds"] = float(seg_cfg["judge"].get("segment_min_seconds", 8)) + 2
+                p = backtrack.plan_window(a, bb, rec, sorted(set(sent) | set(rec_bounds(rec))), sent, seg_cfg)
+        else:
+            p = backtrack.plan(ev, rec, rec_bounds(rec), plan_cfg)
         # 候选不能超出这个直播间的数据范围（实测在数据末尾的异常，收尾时间会超出最后一条消息）
         if room.end_ts is not None and p.end > room.end_ts:
             p.end, p.end_source = room.end_ts, "data_end"
@@ -110,6 +134,13 @@ def run_pipeline(cfg: Dict[str, Any], dataset_dir: Path, out_dir: Path) -> Dict[
             p.start, p.start_source = room.start_ts, "data_start"
         # 候选窗口可能比检测时刻还晚（先粗后细时会往后多留几秒），要等窗口走完才能判定
         now = max(now, p.end)
+        if v2:
+            ns = sched.clamp_start(ev.room_id, p.start, p.end, now)
+            if ns > p.start:
+                p.start, p.start_source = ns, "recording_start"
+                p.segments = [sg for sg in p.segments if sg["end"] > ns]
+                if p.segments:
+                    p.segments[0]["start"] = round(max(p.segments[0]["start"], ns), 3)
         cand = Candidate(
             cand_id=f"{ev.event_id}-c", room_id=ev.room_id, event_id=ev.event_id, cause=attr.cause,
             start=p.start, end=p.end, start_source=p.start_source, end_source=p.end_source,
@@ -124,8 +155,14 @@ def run_pipeline(cfg: Dict[str, Any], dataset_dir: Path, out_dir: Path) -> Dict[
             return
         for other in cands[:-1]:
             if other.room_id == cand.room_id and other.status == "accepted":
-                ov = _overlap(other.start, other.end, cand.start, cand.end)
-                if ov >= float(b["duplicate_overlap"]) * min(other.end - other.start, cand.end - cand.start):
+                if v2:  # 宽窗口有 5 分钟，彼此大段重叠；去重看已切出的片段有没有盖住这次异常本身（换算回声音时间）
+                    core0, core1 = ev.start - lead, ev.end - lead
+                    ov = _overlap(other.start, other.end, core0, core1)
+                    dup = ov >= float(b["duplicate_overlap"]) * max(core1 - core0, 1.0)
+                else:
+                    ov = _overlap(other.start, other.end, cand.start, cand.end)
+                    dup = ov >= float(b["duplicate_overlap"]) * min(other.end - other.start, cand.end - cand.start)
+                if dup:
                     cand.status, cand.note = "duplicate", f"与 {other.cand_id} 重叠，合并去重"
                     return
 
@@ -136,7 +173,11 @@ def run_pipeline(cfg: Dict[str, Any], dataset_dir: Path, out_dir: Path) -> Dict[
         t0 = time.time()
         frames = []
         n_frames = int(cfg["judge"].get("frames", 0))
-        if n_frames and judge.kind != "accept_all":
+        if v2 and n_frames and judge.kind != "accept_all":
+            paths = evidence.contact_sheets(rec.path, [rec.rel((sg["start"] + sg["end"]) / 2) for sg in p.segments],
+                                            out_dir / "evidence" / cand.cand_id)
+            frames = [str(Path(x).relative_to(out_dir)) for x in paths]
+        elif n_frames and judge.kind != "accept_all":
             if refine:  # 每段中间一张图，最多 frames_max 张
                 segs = p.segments
                 k = int(cfg["judge"].get("frames_max", 8))
@@ -147,6 +188,7 @@ def run_pipeline(cfg: Dict[str, Any], dataset_dir: Path, out_dir: Path) -> Dict[
             paths = media.extract_frames(rec.path, [rec.rel(t) for t in times], out_dir / "evidence" / cand.cand_id)
             frames = [str(Path(x).relative_to(out_dir)) for x in paths]
         curve = [s["chat_users"] for s in signals if s["room_id"] == ev.room_id and p.start <= s["t"] <= p.end]
+        chats = list(room_chats[ev.room_id])
         request = {
             "task": "判断这个直播片段值不值得切成独立切片，严格按 output_spec 输出 JSON；只选段号，不要输出时间戳",
             "judge": judge.kind,
@@ -170,21 +212,46 @@ def run_pipeline(cfg: Dict[str, Any], dataset_dir: Path, out_dir: Path) -> Dict[
                 "chat_users_curve": curve,
             },
         }
+        sents = []
+        if v2:
+            request["version"] = 2
+            request["prompt_rev"] = PROMPT_REV_V2  # 提示改了，账本的键跟着变，不会回放按旧提示得到的回答
+            # 这个直播间最近已经切过的笑点：避免在后面的窗口里又选中同一个梗（观众会持续刷好一阵）
+            recent = [c.judge.get("punchline", "") for c in cands[:-1]
+                      if c.room_id == cand.room_id and c.status == "accepted" and c.judge
+                      and cand.start - c.end <= float(cfg["judge"].get("same_punchline_window_seconds", 600))]
+            if recent:
+                request["already_clipped"] = recent
+            sents = evidence.window_sentences(transcripts.get(ev.room_id, []), p.start, p.end)
+            request["sentence_count"] = len(sents)
+            request["target_seconds"] = cfg["judge"].get("target_seconds", "15～30")
+            if cfg["judge"].get("taste"):  # 人工审核总结出的口味，写进提示（hotclip 的 reviewMemory 做法）
+                request["taste"] = list(cfg["judge"]["taste"])
+            for seg, raw in zip(request["segments"], p.segments):
+                seg.update(evidence.segment_details(raw, sents,
+                                                    perception.get(ev.room_id, {}), chats, lead))
+            request["evidence"]["audio_peaks"] = ev.stats.get("audio_peaks", {})
+            request["evidence"]["transcript"] = ev.stats.get("transcript", "")
         res = judge_candidate(judge, ledger, request, int(cfg["judge"]["max_revisions"]))
         for st in res["ledger"]:
             counters[f"judge_{st}"] += 1
-            if st == "received":
+            if st in ("received", "failed"):  # 失败的调用也花了钱，同样计入配额
                 counters["judge_new_calls"] += 1
         stage(cand, "judge", now, t0)
         if res["status"] != "ok":
             cand.status, cand.note = "judge_failed", res["error"]
             return
         cand.judge = res["result"]
+        min_score = cfg["judge"].get("min_funny_score") if v2 else None
+        if min_score is not None and cand.judge["worth_clipping"] and int(cand.judge.get("funny_score", 0)) < int(min_score):
+            cand.status = "rejected"
+            cand.note = f"好笑分 {cand.judge.get('funny_score')} 低于 {min_score}：{cand.judge.get('punchline', '')}"[:200]
+            return
         if not cand.judge["worth_clipping"]:
             cand.status, cand.note = "rejected", cand.judge["reason"]
             return
         cand.status = "accepted"
-        if refine:
+        if refine or v2:
             chosen = [sid for part in ("setup", "climax", "reaction") for sid in cand.judge["structure"].get(part, [])]
             spans = [sg for sg in p.segments if sg["id"] in chosen]
             if spans:
@@ -193,9 +260,57 @@ def run_pipeline(cfg: Dict[str, Any], dataset_dir: Path, out_dir: Path) -> Dict[
                 ne = min(max(ne, ns + mn), ns + mx, p.end)
                 cand.start, cand.end = round(ns, 3), round(ne, 3)
                 cand.start_source = cand.end_source = "judge_segment"
+        cut = cand.judge.get("cut") if v2 else None
+        if cut and sents:  # 精剪：按模型给的句号范围，切点取句子起止（前留一点、后留笑声收尾）
+            j = cfg["judge"]
+            ns = sents[cut["from"] - 1]["start"] - float(j.get("cut_pre_seconds", 0.5))
+            # 模型选的最后几句如果和前一句隔了很久，多半是为了把观众反应带上而多选的，去掉
+            # （test10 Gus：多选了 10 秒后无关的第 40 句，片段从 13.8 秒变成 25.9 秒，用户嫌长）
+            to = cut["to"]
+            gap_max = float(j.get("max_sentence_gap", 4))
+            while to > cut["from"] and sents[to - 1]["start"] - sents[to - 2]["end"] > gap_max:
+                to -= 1
+            if to != cut["to"]:
+                cand.judge["cut_trimmed_to"] = to
+            last = sents[to - 1]["end"]
+            mn, mx = float(j.get("clip_min_seconds", 10)), float(j.get("clip_max_seconds", 40))
+            tail = float(j.get("cut_tail_seconds", 2))
+            if last + tail - ns > mx:  # 太长：截到上限以内最后一句的结尾
+                fit = [x["end"] for x in sents[cut["from"] - 1:to] if x["end"] + tail - ns <= mx]
+                last = max(fit) if fit else ns + mx - tail
+            # 最后一句后面紧接着有笑声，就把笑声留完（用户反馈：有的片段好笑的只是笑声本身）
+            last = evidence.laugh_end(last, perception.get(ev.room_id, {}), ns + mx - tail)
+            ne = max(last + tail, ns + mn)
+            ns, ne = max(ns, p.start), min(ne, p.end)
+            cand.start, cand.end = round(ns, 3), round(ne, 3)
+            cand.start_source = cand.end_source = "judge_sentence"
+            # 核对模型照抄的笑点原话确实在选中的句子里（hotclip 的"引用原话反查、对不上就丢"）。
+            # test10 Gus 第二个候选：窗口里只剩观众还在刷 hungry，模型说笑点是 hungry，选的却是"别的外的 / 一百零五"
+            quote = str(cand.judge.get("key_quote") or "").strip()
+            chosen_sents = sents[cut["from"] - 1:to]
+            if quote in ("（笑声）", "(笑声)"):
+                grounded = any(evidence.sentence_laugh(x, perception.get(ev.room_id, {})) >= evidence.LAUGH_MARK
+                               for x in chosen_sents)
+            else:
+                grounded = _quote_found(quote, " ".join(x["text"] for x in chosen_sents)) >= \
+                    float(j.get("quote_min_found", 0.5))
+            if quote and not grounded:
+                cand.status = "rejected"
+                cand.note = f"模型说的笑点原话「{quote[:30]}」不在它选的句子里，可能看错了位置"
+                return
+        if v2:  # 宽窗口互相重叠，模型可能在另一次异常的窗口里又选中同一个笑点（test10 Gus 的 hungry 梗被选了两次）
+            for other in cands[:-1]:
+                if other.room_id == cand.room_id and other.status == "accepted":
+                    ov = _overlap(other.start, other.end, cand.start, cand.end)
+                    gap = max(other.start, cand.start) - min(other.end, cand.end)  # 不重叠时两段之间隔了多久
+                    near = gap <= float(cfg["judge"].get("adjacent_gap_seconds", 10))
+                    if near or ov >= float(b["duplicate_overlap"]) * min(other.end - other.start, cand.end - cand.start):
+                        # 紧挨着的也算同一个笑点（test10 Gus：第二段是观众纠正 hungry 的后半截，和第一段只隔几秒）
+                        cand.status, cand.note = "duplicate", f"判定选中的段和 {other.cand_id} 重叠或紧挨着，合并去重"
+                        return
         if cfg["render"]["enabled"]:
             t0 = time.time()
-            cand.clip = render_clip(cand, rec, out_dir, cfg)
+            cand.clip = render_clip(cand, rec, out_dir, cfg, transcripts.get(ev.room_id) if v2 else None)
             stage(cand, "render", now, t0)
             if not cand.clip["check_ok"]:
                 cand.status, cand.note = "render_failed", "；".join(cand.clip["problems"])
