@@ -19,6 +19,7 @@ class Room:
     start_ts: float  # 开播时间
     end_ts: Optional[float] = None  # 下播时间，未知为 None
     stream_start_known: bool = True  # False = start_ts 只是开始采集的时刻，不是真实开播时间
+    sec_uid: Optional[str] = None  # 主播主页 ID（实测时按它查开播状态）
 
     def is_live(self, t: float) -> bool:
         return t >= self.start_ts and (self.end_ts is None or t < self.end_ts)

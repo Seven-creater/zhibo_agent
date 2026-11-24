@@ -42,13 +42,36 @@ def _env_no_proxy() -> Dict[str, str]:
     return {k: v for k, v in os.environ.items() if k not in PROXY_VARS}
 
 
-def parse_room(arg: str) -> Dict[str, str]:
-    """"名字=直播间号或链接" 或只有号码。"""
-    name, _, rid = arg.partition("=") if "=" in arg else ("", "", arg)
-    m = re.search(r"(\d{6,})", rid)
+UA = ("Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 "
+      "(KHTML, like Gecko) Chrome/140.0.0.0 Safari/537.36")
+
+
+def parse_room(arg: str) -> Dict[str, Optional[str]]:
+    """支持三种写法：名字=直播间号、名字=live.douyin.com 链接、名字=主播主页链接（douyin.com/user/<sec_uid>）。
+    主页链接适合还没开播的主播：开播后自动查到直播间号。"""
+    name, _, val = arg.partition("=") if "=" in arg else ("", "", arg)
+    m = re.search(r"/user/(MS4w[\w-]+)", val) or re.match(r"(MS4w[\w-]+)$", val.strip())
+    if m:
+        return {"room_id": None, "sec_uid": m.group(1), "anchor": name or m.group(1)[:12]}
+    m = re.search(r"(\d{6,})", val)
     if not m:
-        raise SystemExit(f"认不出直播间号：{arg}（要 live.douyin.com/ 后面那串数字）")
-    return {"room_id": m.group(1), "anchor": name or m.group(1)}
+        raise SystemExit(f"认不出直播间：{arg}（要直播间号、live.douyin.com 链接或主播主页链接）")
+    return {"room_id": m.group(1), "sec_uid": None, "anchor": name or m.group(1)}
+
+
+def resolve_live_room(sec_uid: str) -> Optional[str]:
+    """按主播 sec_uid 查是否在播；在播返回直播间号（web_rid），没播返回 None。不需要登录。"""
+    url = ("https://webcast.amemv.com/webcast/room/reflow/info/?type_id=0&live_id=1&room_id=2"
+           f"&sec_user_id={sec_uid}&version_code=99.99.99&app_id=1128")
+    try:
+        with NO_PROXY.open(urllib.request.Request(url, headers={"User-Agent": UA}), timeout=15) as r:
+            d = json.loads(r.read())
+    except (OSError, json.JSONDecodeError):
+        return None
+    room = (d.get("data") or {}).get("room") or {}
+    if d.get("status_code") == 0 and room.get("status") == 2:
+        return (room.get("owner") or {}).get("web_rid")
+    return None
 
 
 class Hub:
@@ -161,20 +184,50 @@ class Recorder(threading.Thread):
 
 
 class Collector:
-    def __init__(self, rooms: List[Dict[str, str]], out: Path, hub: Hub, salt: str):
-        self.rooms = {r["room_id"]: r for r in rooms}
+    def __init__(self, rooms: List[Dict[str, Optional[str]]], out: Path, hub: Hub, salt: str):
         self.out, self.hub, self.salt = out, hub, salt
         self.stop = threading.Event()
         (out / "messages").mkdir(parents=True, exist_ok=True)
-        self.files = {rid: (out / "messages" / f"{rid}.jsonl").open("a", encoding="utf-8") for rid in self.rooms}
-        self.status: Dict[str, str] = {rid: "waiting" for rid in self.rooms}
+        self.logf = (out / "collect.log").open("a", encoding="utf-8")
+        self.rooms: Dict[str, Dict[str, Optional[str]]] = {}
+        self.pending = [r for r in rooms if not r["room_id"]]  # 只给了主页、还没查到直播间号的主播
+        self.files: Dict[str, Any] = {}
+        self.status: Dict[str, str] = {}
         self.first_ts: Dict[str, float] = {}
         self.last_ts: Dict[str, float] = {}
         self.minute: Dict[str, Counter] = defaultdict(Counter)
         self.methods: Dict[str, Counter] = defaultdict(Counter)
         self.online: Dict[str, int] = {}
-        self.recorders = {rid: Recorder(hub, rid, out / "recordings" / rid, self.stop, self.log) for rid in self.rooms}
-        self.logf = (out / "collect.log").open("a", encoding="utf-8")
+        self.recorders: Dict[str, Recorder] = {}
+        for r in rooms:
+            if r["room_id"]:
+                self._add_room(r)
+
+    def _add_room(self, r: Dict[str, Optional[str]]) -> None:
+        rid = r["room_id"]
+        self.files[rid] = (self.out / "messages" / f"{rid}.jsonl").open("a", encoding="utf-8")
+        self.status[rid] = "waiting"
+        self.recorders[rid] = Recorder(self.hub, rid, self.out / "recordings" / rid, self.stop, self.log)
+        self.rooms[rid] = r
+        if self.started:
+            self.recorders[rid].start()
+
+    started = False
+
+    def _resolve_pending(self) -> None:
+        """每分钟按主页查一次还没开播的主播，开播了就加进采集。"""
+        while self.pending and not self.stop.is_set():
+            for r in list(self.pending):
+                rid = resolve_live_room(r["sec_uid"])
+                if rid:
+                    self.pending.remove(r)
+                    if rid in self.rooms:
+                        continue
+                    r = dict(r, room_id=rid)
+                    self.log(f"[开播] {r['anchor']} 开播了，直播间号 {rid}，开始采集")
+                    self._add_room(r)
+                    self.hub.connect(rid)  # 立刻连，不等下一轮状态检查
+            self.stop.wait(60)
 
     def log(self, msg: str) -> None:
         line = time.strftime("%H:%M:%S ") + msg
@@ -219,7 +272,7 @@ class Collector:
 
     def _keep_connected(self) -> None:
         while not self.stop.is_set():
-            for rid in self.rooms:
+            for rid in list(self.rooms):
                 info = self.hub.room(rid)
                 st = info.get("status") or "not_connected"
                 if st in ("closed", "error", "stopped", "not_connected"):
@@ -234,22 +287,26 @@ class Collector:
     def _monitor(self) -> None:
         while not self.stop.wait(60):
             parts = []
-            for rid, r in self.rooms.items():
+            for rid, r in list(self.rooms.items()):
                 c = self.minute.pop(rid, Counter())
                 size = sum(p.stat().st_size for p in (self.out / "recordings" / rid).glob("*.ts")) / 1e9
                 parts.append(f"{r['anchor']}：在线 {self.online.get(rid, '-')}，弹幕 {c['chat']}/分，"
                              f"笑点 {c['laugh']}/分，录像 {size:.2f} GB，{self.status[rid]}")
+            parts += [f"{r['anchor']}：等待开播" for r in list(self.pending)]
             self.log("[每分钟] " + "；".join(parts))
 
     def run(self, hours: float, laugh_words: List[str]) -> None:
         self.hub.ensure_account()
-        for rec in self.recorders.values():
+        self.started = True
+        for rec in list(self.recorders.values()):
             rec.start()
+        threading.Thread(target=self._resolve_pending, daemon=True).start()
         threading.Thread(target=self._keep_connected, daemon=True).start()
         threading.Thread(target=self._monitor, daemon=True).start()
         deadline = time.time() + hours * 3600
         threading.Thread(target=lambda: (self.stop.wait(max(0, deadline - time.time())), self.stop.set()), daemon=True).start()
-        self.log(f"开始采集 {len(self.rooms)} 个直播间，最长 {hours} 小时，Ctrl+C 结束。输出：{self.out}")
+        self.log(f"开始采集：{len(self.rooms)} 个直播间，另有 {len(self.pending)} 位主播等待开播；"
+                 f"最长 {hours} 小时，Ctrl+C 结束。输出：{self.out}")
         try:
             for ev in self.hub.events(self.stop):
                 rid = ev.get("roomId")
@@ -285,7 +342,7 @@ class Collector:
 
     def finalize(self) -> None:
         rooms, recs = [], {}
-        for rid, r in self.rooms.items():
+        for rid, r in list(self.rooms.items()):
             sessions = []
             for s in self.recorders[rid].sessions:
                 p = self.out / "recordings" / rid / s["path"]
@@ -298,7 +355,7 @@ class Collector:
                 continue
             rooms.append({"room_id": rid, "anchor": r["anchor"], "category": "搞笑", "source": "manual",
                           "start_ts": self.first_ts[rid], "end_ts": self.last_ts[rid] + 1,
-                          "stream_start_known": False})
+                          "stream_start_known": False, "sec_uid": r.get("sec_uid")})
             recs[rid] = sessions
         dump = lambda name, obj: (self.out / name).write_text(json.dumps(obj, ensure_ascii=False, indent=2), encoding="utf-8")
         dump("rooms.json", rooms)
