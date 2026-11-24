@@ -263,12 +263,21 @@ def run_pipeline(cfg: Dict[str, Any], dataset_dir: Path, out_dir: Path) -> Dict[
         cut = cand.judge.get("cut") if v2 else None
         if cut and sents:  # 精剪：按模型给的句号范围，切点取句子起止（前留一点、后留笑声收尾）
             j = cfg["judge"]
-            ns = sents[cut["from"] - 1]["start"] - float(j.get("cut_pre_seconds", 0.5))
+            quote = str(cand.judge.get("key_quote") or "").strip()
+            frm = cut["from"]
+            # 笑点就在选的第一句里时，把前面紧挨着的一句也带上当铺垫（用户反馈：吕德华"骂一半秒怂"那段
+            # 切在了"我不顶死你呀"中间，看不出他为什么发火）
+            if frm > 1 and quote and quote not in ("（笑声）", "(笑声)") \
+                    and _quote_found(quote, sents[frm - 1]["text"]) >= float(j.get("quote_min_found", 0.5)) \
+                    and sents[frm - 1]["start"] - sents[frm - 2]["end"] <= float(j.get("setup_max_gap", 6)):
+                frm -= 1
+                cand.judge["cut_setup_from"] = frm
+            ns = sents[frm - 1]["start"] - float(j.get("cut_pre_seconds", 0.5))
             # 模型选的最后几句如果和前一句隔了很久，多半是为了把观众反应带上而多选的，去掉
             # （test10 Gus：多选了 10 秒后无关的第 40 句，片段从 13.8 秒变成 25.9 秒，用户嫌长）
             to = cut["to"]
             gap_max = float(j.get("max_sentence_gap", 4))
-            while to > cut["from"] and sents[to - 1]["start"] - sents[to - 2]["end"] > gap_max:
+            while to > frm and sents[to - 1]["start"] - sents[to - 2]["end"] > gap_max:
                 to -= 1
             if to != cut["to"]:
                 cand.judge["cut_trimmed_to"] = to
@@ -276,7 +285,7 @@ def run_pipeline(cfg: Dict[str, Any], dataset_dir: Path, out_dir: Path) -> Dict[
             mn, mx = float(j.get("clip_min_seconds", 10)), float(j.get("clip_max_seconds", 40))
             tail = float(j.get("cut_tail_seconds", 2))
             if last + tail - ns > mx:  # 太长：截到上限以内最后一句的结尾
-                fit = [x["end"] for x in sents[cut["from"] - 1:to] if x["end"] + tail - ns <= mx]
+                fit = [x["end"] for x in sents[frm - 1:to] if x["end"] + tail - ns <= mx]
                 last = max(fit) if fit else ns + mx - tail
             # 最后一句后面紧接着有笑声，就把笑声留完（用户反馈：有的片段好笑的只是笑声本身）
             last = evidence.laugh_end(last, perception.get(ev.room_id, {}), ns + mx - tail)
@@ -286,8 +295,7 @@ def run_pipeline(cfg: Dict[str, Any], dataset_dir: Path, out_dir: Path) -> Dict[
             cand.start_source = cand.end_source = "judge_sentence"
             # 核对模型照抄的笑点原话确实在选中的句子里（hotclip 的"引用原话反查、对不上就丢"）。
             # test10 Gus 第二个候选：窗口里只剩观众还在刷 hungry，模型说笑点是 hungry，选的却是"别的外的 / 一百零五"
-            quote = str(cand.judge.get("key_quote") or "").strip()
-            chosen_sents = sents[cut["from"] - 1:to]
+            chosen_sents = sents[frm - 1:to]
             if quote in ("（笑声）", "(笑声)"):
                 grounded = any(evidence.sentence_laugh(x, perception.get(ev.room_id, {})) >= evidence.LAUGH_MARK
                                for x in chosen_sents)

@@ -14,7 +14,7 @@
     "clip_min_seconds": 8,
     "clip_max_seconds": 25,
     "max_sentence_gap": 4,
-    "cut_pre_seconds": 0.5,
+    "cut_pre_seconds": 3,
     "cut_tail_seconds": 2,
     "min_funny_score": 8,
     "adjacent_gap_seconds": 10,
