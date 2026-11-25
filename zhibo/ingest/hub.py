@@ -75,5 +75,11 @@ def start_hub(port: int) -> subprocess.Popen:
     if not (HUB_DIR / "dist" / "index.js").exists():
         raise SystemExit(f"没找到 dyhub：{HUB_DIR}，先按 README 安装")
     env = _env_no_proxy() | {"DYHUB_HOST": "127.0.0.1", "DYHUB_PORT": str(port)}
+    if not env.get("DYHUB_CHROME"):  # dyhub 只认几个固定路径；服务器上 Chrome 常装在别处，按 PATH 找到后告诉它（EVO-030）
+        from ..deploy_check import _chrome
+
+        chrome = _chrome()
+        if chrome:
+            env["DYHUB_CHROME"] = chrome
     log = (HUB_DIR / "dyhub.log").open("a")
     return subprocess.Popen(["node", "dist/index.js"], cwd=HUB_DIR, env=env, stdout=log, stderr=subprocess.STDOUT)

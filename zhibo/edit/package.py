@@ -479,8 +479,7 @@ def package_clip(clip: Path, out: Path, sentences: List[Dict[str, Any]], percept
     cmd = [media.ffmpeg(), "-hide_banner", "-loglevel", "error", "-y", "-i", str(edit),
            "-loop", "1", "-framerate", str(FPS), "-i", str(work / "title.png"),
            "-framerate", str(FPS), "-i", pattern] + a_args
-    # ffmpeg 7 起用 "-/选项 文件" 从文件读选项值（ffmpeg 9 已去掉旧的 -filter_complex_script）
-    cmd += ["-/filter_complex", str(script), "-map", "[vout]", "-map", "[aout]", "-t", f"{total:.3f}", "-r", str(FPS),
+    cmd += media.filter_script_args(script) + ["-map", "[vout]", "-map", "[aout]", "-t", f"{total:.3f}", "-r", str(FPS),
             "-c:v", "libx264", "-preset", "veryfast", "-crf", str(p.get("crf", 22)),
             "-c:a", "aac", "-b:a", "160k", "-movflags", "+faststart", str(out)]
     r = subprocess.run(cmd, capture_output=True, text=True)

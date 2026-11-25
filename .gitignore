@@ -9,3 +9,4 @@ third_party/
 .env
 models/
 .claude/
+logs/

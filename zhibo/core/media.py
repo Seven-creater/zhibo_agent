@@ -16,6 +16,24 @@ def ffmpeg() -> str:
     return path
 
 
+_MAJOR: List[int] = []
+
+
+def ffmpeg_major() -> int:
+    """ffmpeg 主版本号（读 "ffmpeg version 6.1.1-..."），读不出来当作 7。"""
+    if not _MAJOR:
+        out = subprocess.run([ffmpeg(), "-version"], capture_output=True, text=True).stdout
+        m = re.match(r"ffmpeg version n?(\d+)\.", out)
+        _MAJOR.append(int(m.group(1)) if m else 7)
+    return _MAJOR[0]
+
+
+def filter_script_args(script: Path) -> List[str]:
+    """从文件读 filter_complex 的参数：ffmpeg 7 起是 "-/filter_complex 文件"（ffmpeg 9 去掉了旧写法）；
+    ffmpeg 6 及更早只认 "-filter_complex_script 文件"（Ubuntu 24.04 自带 6.1，EVO-030）。"""
+    return ["-/filter_complex", str(script)] if ffmpeg_major() >= 7 else ["-filter_complex_script", str(script)]
+
+
 def _run(args: List[str]) -> subprocess.CompletedProcess:
     return subprocess.run(args, capture_output=True, text=True)
 
