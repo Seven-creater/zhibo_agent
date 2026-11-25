@@ -34,10 +34,11 @@ class ReplaySource:
         rooms = json.loads((self.dir / "rooms.json").read_text(encoding="utf-8"))
         self.rooms: List[Room] = [Room(**r) for r in rooms]
         recs = json.loads((self.dir / "recordings.json").read_text(encoding="utf-8"))
-        # 每个直播间可以有多段录像（实测时断流重连会分段）；旧格式是单个对象
+        # 每个直播间可以有多段录像（实测时断流重连会分段）；旧格式是单个对象。
+        # 画面文件被按天清理掉的（zhibo/retention.py）跳过，这段时间当作没有录像。
         self.recordings: Dict[str, List[Recording]] = {
             rid: [Recording(rid, self.dir / r["path"], r["start_ts"], r["duration"])
-                  for r in (v if isinstance(v, list) else [v])]
+                  for r in (v if isinstance(v, list) else [v]) if (self.dir / r["path"]).exists()]
             for rid, v in recs.items()
         }
         self._perception: Dict[str, Dict[int, Dict[str, Any]]] = {}

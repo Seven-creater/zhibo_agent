@@ -25,7 +25,7 @@
 | [sherpa-onnx](https://github.com/k2-fsa/sherpa-onnx) 2.0.3 | Apache-2.0 | 说话检测、转写、声音分类（项目 `.venv`） |
 | numpy | BSD-3-Clause | 声音特征计算（项目 `.venv`） |
 | Pillow 11.3.0 | MIT-CMU（HPND） | 成片包装：把标题、字幕画成透明图片（项目 `.venv`） |
-| macOS 自带字体 Hiragino Sans GB（冬青黑体） | 系统字体，随系统授权，本仓库不分发 | 标题、字幕字体 |
+| macOS 自带字体 Hiragino Sans GB（冬青黑体）；Linux 上用 Noto Sans CJK | 冬青黑体是系统字体，随系统授权；Noto Sans CJK 为 SIL OFL 1.1，由系统包安装。本仓库都不分发 | 标题、字幕字体（自动查找） |
 | FFmpeg | LGPL/GPL（随本机安装） | 录制、解码、裁切 |
 
 ## 模型（`scripts/fetch_models.sh` 下载到 `models/`，不进仓库）

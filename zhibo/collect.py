@@ -387,6 +387,11 @@ def cmd_collect(args, cfg: Dict[str, Any]) -> None:
     rooms = [parse_room(a) for a in args.room]
     out = Path(args.out or time.strftime("data/live_%Y%m%d_%H%M"))
     out.mkdir(parents=True, exist_ok=True)
+    days = (cfg.get("retention") or {}).get("video_days")
+    if days:  # 开始采集前先清掉过期的画面录像（EVO-029），免得服务器磁盘被慢慢占满
+        from .retention import prune_videos
+
+        prune_videos(out.parent, float(days), apply=True, log=lambda m: print(m, flush=True))
     salt_file = Path("state/salt.txt")
     salt_file.parent.mkdir(parents=True, exist_ok=True)
     if not salt_file.exists():

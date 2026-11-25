@@ -148,12 +148,14 @@ zhibo/
   engine.py        每秒引擎 RoomEngine：实时采集和离线回放共用（聚合 → 检测 → 报告异常开始/结束）
   pipeline.py      离线回放：引擎 → 归因 → 调度/录制覆盖 → 回溯 → 判定 → 出片 → 评测
   collect.py       实时采集：dyhub 弹幕 + 录制 + 引擎 + 即时重放
+  retention.py     按天数清理画面录像（音频、弹幕、标注集保留）
+  deploy_check.py  部署自检（python -m zhibo check）
   core/            models 数据结构 · config 配置 · ledger 模型请求账本 · media FFmpeg 工具
   ingest/          douyin 抖音接口 · hub dyhub 客户端 · recorder 录制（环形缓冲 + 整场音频） · sources 回放数据源
   perceive/        chat 弹幕信号 · audio 音量特征 · speech 说话检测和转写 · tagger 声音分类 · hearing 声音感知总装（以后加 scene）
   detect/          episode 只看弹幕的检测 · fuse 弹幕 + 声音融合检测 · attribution 归因
   act/             replay 即时重放保留策略 · scheduler 录制路数调度
-  edit/            backtrack 回溯找边界 · judge 判定器 · render 出片
+  edit/            backtrack 回溯找边界 · judge 判定器 · render 出片 · package 竖屏成片（timeline、textlayer、sound、camfind）
   evaluate/        evaluate 指标 · report 报告 · demo_data 合成数据
 ```
 
@@ -208,7 +210,11 @@ python3 -m zhibo run --config configs/demo.json --set scheduler.record_budget=1 
 python3 -m zhibo run --config configs/demo.json --set ledger.replay_only=true     # 只回放账本，不发新请求
 python3 -m zhibo eval --run runs/system                                          # 只重算指标
 python3 -m zhibo make-data --force                                               # 重新生成合成数据
+.venv/bin/python -m zhibo check                                                  # 部署自检：依赖、模型、字体、内存、磁盘
+python3 -m zhibo cleanup --days 3                                                # 列出可清理的画面录像，加 --yes 才真删
 ```
+
+部署到 Linux 服务器（机器怎么选、安装、长期运行、磁盘清理）见 [docs/部署.md](docs/部署.md)。
 
 参数都在 `configs/demo.json`；基线配置 `configs/baseline_chat_density.json` 继承它，只改几项。同一输入重跑，报告里的"结果指纹"应该一致。
 

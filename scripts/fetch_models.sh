@@ -1,5 +1,5 @@
 #!/bin/sh
-# 下载声音感知用的三个模型到 models/（不进仓库），并建项目 .venv。来源都是 sherpa-onnx 的 GitHub 发布页（Apache-2.0）。
+# 下载声音感知用的三个模型到 models/（不进仓库），并建项目 .venv（装 requirements.txt）。来源都是 sherpa-onnx 的 GitHub 发布页（Apache-2.0）。
 #   silero_vad_v5.onnx                                        约 2 MB    说话检测
 #   sherpa-onnx-sense-voice-zh-en-ja-ko-yue-int8-2025-09-09     约 166 MB  中文转写（压缩包）
 #   sherpa-onnx-zipformer-small-audio-tagging-2024-04-15        约 111 MB  声音分类（压缩包）
@@ -7,7 +7,7 @@ set -e
 cd "$(dirname "$0")/.."
 if [ ! -x .venv/bin/python ]; then
   python3 -m venv .venv
-  .venv/bin/python -m pip install -q sherpa-onnx==2.0.3 numpy
+  .venv/bin/python -m pip install -q -r requirements.txt
 fi
 mkdir -p models
 cd models

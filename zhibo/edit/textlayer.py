@@ -20,11 +20,79 @@ def _hex(c: str) -> Tuple[int, int, int, int]:
     return (int(c[0:2], 16), int(c[2:4], 16), int(c[4:6], 16), 255)
 
 
+# 找中文粗体字体：配置里写了 font 就用它；否则按系统依次找。.ttc 里有多个字体，按名字挑出简体中文的粗体那一个。
+# macOS 自带冬青黑体；Linux 装 Noto Sans CJK（Debian/Ubuntu: fonts-noto-cjk，Fedora: google-noto-sans-cjk-fonts）。
+FONT_CANDIDATES = [
+    ("/System/Library/Fonts/Hiragino Sans GB.ttc", "Hiragino Sans GB", "W6"),
+    ("/System/Library/Fonts/PingFang.ttc", "PingFang SC", "Semibold"),
+    ("/usr/share/fonts/opentype/noto/NotoSansCJK-Bold.ttc", "Noto Sans CJK SC", "Bold"),
+    ("/usr/share/fonts/noto-cjk/NotoSansCJK-Bold.ttc", "Noto Sans CJK SC", "Bold"),
+    ("/usr/share/fonts/google-noto-cjk/NotoSansCJK-Bold.ttc", "Noto Sans CJK SC", "Bold"),
+    ("/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc", "Noto Sans CJK SC", "Regular"),
+    ("/usr/share/fonts/truetype/wqy/wqy-zenhei.ttc", "WenQuanYi Zen Hei", ""),
+]
+_resolved: Dict[Tuple[Any, Any], Tuple[str, int]] = {}
+
+
+def _face_index(path: str, family: str, style: str) -> Optional[int]:
+    """在 .ttc 里按名字找字体的序号；找不到返回 None。"""
+    from PIL import ImageFont
+
+    for i in range(16):
+        try:
+            name, st = ImageFont.truetype(path, 20, index=i).getname()
+        except OSError:
+            break
+        if family in (name or "") and (not style or style in (st or "") or style in (name or "")):
+            return i
+    return None
+
+
+def _fc_match() -> Optional[Tuple[str, int]]:
+    """最后手段：问 fontconfig 要一个简体中文粗体（Linux 上一般有 fc-match）。"""
+    import shutil
+    import subprocess
+
+    if not shutil.which("fc-match"):
+        return None
+    r = subprocess.run(["fc-match", "-f", "%{file}\n%{index}", ":lang=zh-cn:weight=bold"],
+                       capture_output=True, text=True)
+    lines = r.stdout.strip().split("\n")
+    if r.returncode != 0 or len(lines) < 2 or not Path(lines[0]).exists():
+        return None
+    return lines[0], int(lines[1] or 0)
+
+
+def resolve_font(cfg: Dict[str, Any]) -> Tuple[str, int]:
+    """返回（字体文件，ttc 序号）。找不到中文字体时报错，并说明 Linux 上装哪个包。"""
+    key = (cfg.get("font"), cfg.get("font_index"))
+    if key in _resolved:
+        return _resolved[key]
+    if cfg.get("font"):
+        if not Path(cfg["font"]).exists():
+            raise FileNotFoundError(f"配置的字体不存在：{cfg['font']}")
+        found = (cfg["font"], int(cfg.get("font_index", 0)))
+    else:
+        found = None
+        for path, family, style in FONT_CANDIDATES:
+            if Path(path).exists():
+                i = _face_index(path, family, style)
+                if i is not None:
+                    found = (path, i)
+                    break
+        found = found or _fc_match()
+        if not found:
+            raise FileNotFoundError("没找到中文字体。Linux 上装 Noto Sans CJK（Debian/Ubuntu：apt install fonts-noto-cjk），"
+                                    "或在配置 package.font 里写字体文件路径")
+    _resolved[key] = found
+    return found
+
+
 def font(cfg: Dict[str, Any], size: int):
     from PIL import ImageFont
 
-    return ImageFont.truetype(cfg.get("font", "/System/Library/Fonts/Hiragino Sans GB.ttc"), size,
-                              index=int(cfg.get("font_index", 2)))
+    path, index = resolve_font(cfg)
+    return ImageFont.truetype(path, size, index=index)
 
 
 def text_img(segments: List[Tuple[str, Tuple[int, int, int, int]]], fnt, stroke: int, max_w: int):

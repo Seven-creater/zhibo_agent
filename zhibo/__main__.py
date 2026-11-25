@@ -76,6 +76,18 @@ def cmd_demo(args) -> None:
     print(f"对照表：{out}\n本系统报告：runs/system/report.md\n切片：runs/system/clips/")
 
 
+def cmd_cleanup(args) -> None:
+    from .retention import prune_videos
+
+    prune_videos(Path(args.data_root), args.days, apply=args.yes)
+
+
+def cmd_check(args) -> None:
+    from .deploy_check import run_checks
+
+    sys.exit(0 if run_checks(load_config(Path(args.config)), Path(args.data_root)) else 1)
+
+
 def cmd_collect(args) -> None:
     from .collect import cmd_collect as run_collect
 
@@ -124,7 +136,7 @@ def main(argv=None) -> None:
     p.add_argument("--port", type=int, default=8757)
     p.add_argument("--start-hub", action="store_true", help="dyhub 没在运行时顺带启动")
     p.add_argument("--quality", default="ORIGIN", choices=["ORIGIN", "FULL_HD1", "HD1", "SD2", "SD1"],
-                   help="录制清晰度：ORIGIN 原画（默认，实测 1080p 约 2.8 GB/时，随主播变化），FULL_HD1 蓝光，"
+                   help="录制清晰度：ORIGIN 原画（默认，11-24 实测 1080p60 约 19 Mbps、8.5 GB/时，随主播变化），FULL_HD1 蓝光，"
                         "HD1 超清，SD2 高清 720p 约 1 GB/时，SD1 标清")
     p.add_argument("--min-free-gb", type=float, default=15.0, help="磁盘剩余低于这个值就停止录制")
     p.add_argument("--full-record", action="store_true", help="全程录制（默认是环形缓冲，只保留触发的片段）")
@@ -145,6 +157,15 @@ def main(argv=None) -> None:
     p.add_argument("--config", default="configs/live.json")
     p.add_argument("--set", action="append")
     p.set_defaults(fn=cmd_perceive)
+    p = sub.add_parser("cleanup", help="按天数清理数据集里的画面录像（音频、弹幕、标注保留），默认只列出不删")
+    p.add_argument("--data-root", default="data")
+    p.add_argument("--days", type=float, default=3.0, help="最后修改早于几天前的才清理")
+    p.add_argument("--yes", action="store_true", help="真的删除（不加只列出）")
+    p.set_defaults(fn=cmd_cleanup)
+    p = sub.add_parser("check", help="部署自检：Python、依赖、模型、字体、ffmpeg、dyhub、内存、磁盘")
+    p.add_argument("--config", default="configs/fused_glm.json")
+    p.add_argument("--data-root", default="data")
+    p.set_defaults(fn=cmd_check)
     p = sub.add_parser("eval")
     p.add_argument("--run", required=True)
     p.add_argument("--data", default="data/demo")
