@@ -11,6 +11,7 @@
 | `zhibo/perceive/speech.py` | [sherpa-onnx](https://github.com/k2-fsa/sherpa-onnx) `python-api-examples/simulate-streaming-sense-voice-microphone.py`（Copyright (c) 2025 Xiaomi Corporation） | 2.0.3 版发布时的示例 | Apache-2.0 | 改写：输入从麦克风换成样本流，参数按直播调整 |
 | `zhibo/detect/fuse.py` | [hotclip](https://github.com/xixihhhh/hotclip) `src/core/highlight/moments.ts` 的按品类加权（`MOMENT_WEIGHTS.reaction`）、共振加成（`MOMENT_AGREEMENT_BONUS`）、饱和降权（`MOMENT_SATURATION`） | `3543584` | AGPL-3.0 | 思路和常数改写成 Python，用在逐秒的实时融合上 |
 | `zhibo/edit/evidence.py` | clips-studio `ARCHITECTURE.md` 4.4 节"把信号写成事件时间线文字给模型"；hotclip `src/core/highlight/vision.ts` 的九宫格拼图 | `bd39d8b`；`3543584` | AGPL-3.0 | 思路改写成 Python |
+| `zhibo/edit/package.py` | hotclip `src/core/subtitle.ts` 的字幕安全区（画面高度 62～72%）和"关键词换色"样式；clips-studio 游戏布局（摄像头 + 游戏）；OpenShorts 的模糊背景竖屏；video-alchemy 的"剪辑方案即数据" | `3543584`；`bd39d8b`；`d9f14ad`；`3c7fd6b` | AGPL-3.0；AGPL-3.0；MIT；MIT | 思路和参数，用 Python + Pillow + ffmpeg 重写 |
 | `zhibo/perceive/tagger.py` | sherpa-onnx `python-api-examples/audio-tagging-from-a-file.py`；frigate `frigate/events/audio.py` 的"过音量门槛才分类、按类别设阈值" | 同上；`d20d6dc` | Apache-2.0；MIT | 参照调用方式和做法 |
 
 ## 作为外部程序或库使用
@@ -20,6 +21,8 @@
 | [dyhub](https://github.com/ymstar/dyhub) | MIT | 弹幕采集（`third_party/dyhub`，不进仓库） |
 | [sherpa-onnx](https://github.com/k2-fsa/sherpa-onnx) 2.0.3 | Apache-2.0 | 说话检测、转写、声音分类（项目 `.venv`） |
 | numpy | BSD-3-Clause | 声音特征计算（项目 `.venv`） |
+| Pillow 11.3.0 | MIT-CMU（HPND） | 成片包装：把标题、字幕画成透明图片（项目 `.venv`） |
+| macOS 自带字体 Hiragino Sans GB（冬青黑体） | 系统字体，随系统授权，本仓库不分发 | 标题、字幕字体 |
 | FFmpeg | LGPL/GPL（随本机安装） | 录制、解码、裁切 |
 
 ## 模型（`scripts/fetch_models.sh` 下载到 `models/`，不进仓库）

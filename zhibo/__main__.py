@@ -91,6 +91,16 @@ def cmd_perceive(args) -> None:
     perceive_dataset(Path(args.data), load_config(Path(args.config), args.set or []))
 
 
+def cmd_package(args) -> None:
+    try:
+        import PIL  # noqa: F401  画标题和字幕要用
+        from .edit.package_run import package_run
+    except ImportError as e:
+        raise SystemExit(f"成片包装需要项目 .venv 里的 Pillow（{e}）。用 .venv/bin/python -m zhibo package ...")
+    package_run(Path(args.run), Path(args.data), load_config(Path(args.config), args.set or []),
+                only=set(args.only) if args.only else None)
+
+
 def main(argv=None) -> None:
     ap = argparse.ArgumentParser(prog="zhibo", description="抖音直播高光切片 Agent（离线回放 demo）")
     sub = ap.add_subparsers(dest="cmd", required=True)
@@ -123,6 +133,13 @@ def main(argv=None) -> None:
                         "auto（默认）能用声音就用 fused，否则 chat")
     p.add_argument("--config", default="configs/live.json")
     p.set_defaults(fn=cmd_collect)
+    p = sub.add_parser("package", help="把一次运行里接受的片段做成竖屏成片：标题、动态字幕、布局（要项目 .venv）")
+    p.add_argument("--run", required=True)
+    p.add_argument("--data", required=True)
+    p.add_argument("--config", default="configs/fused_glm.json")
+    p.add_argument("--set", action="append")
+    p.add_argument("--only", action="append", help="只做这些候选号，可写多次")
+    p.set_defaults(fn=cmd_package)
     p = sub.add_parser("perceive", help="给数据集补算声音感知：每秒音量、笑声等和逐句稿（要项目 .venv）")
     p.add_argument("--data", required=True)
     p.add_argument("--config", default="configs/live.json")

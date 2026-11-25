@@ -8,3 +8,4 @@ state/
 third_party/
 .env
 models/
+.claude/

@@ -24,5 +24,19 @@
       "如果好笑的只是主播的笑声本身（笑得很魔性），只留笑声和它前面的一句，前面不好笑的对话都不要。",
       "宁缺毋滥：一场直播能出两三条真正好笑的就够了。"
     ]
+  },
+  "package": {
+    "font": "/System/Library/Fonts/Hiragino Sans GB.ttc",
+    "font_index": 2,
+    "title_size": 76,
+    "title_stroke": 7,
+    "caption_size": 64,
+    "caption_stroke": 6,
+    "caption_max_chars": 12,
+    "highlight_color": "#FFE400",
+    "crf": 22,
+    "layouts": {
+      "吕德华": {"kind": "cam_top", "cam": [0.1125, 0.694, 0.307, 0.306], "top": 300}
+    }
   }
 }

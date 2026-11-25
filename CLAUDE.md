@@ -4,7 +4,7 @@
 
 ## 开发约定
 
-- 代码要兼容 Python 3.9（本机系统 Python 是 3.9.6）。核心（合成数据 demo、离线回放）只用标准库和 FFmpeg；声音感知用项目 `.venv` 里的 sherpa-onnx 和 numpy，模型放在 `models/`（不进仓库）。再新增第三方依赖前先说明理由。
+- 代码要兼容 Python 3.9（本机系统 Python 是 3.9.6）。核心（合成数据 demo、离线回放）只用标准库和 FFmpeg；声音感知用项目 `.venv` 里的 sherpa-onnx 和 numpy，成片包装用 `.venv` 里的 Pillow（本机 ffmpeg 没有文字滤镜），模型放在 `models/`（不进仓库）。再新增第三方依赖前先说明理由。
 - 仓库按 AGPL-3.0 发布。复用外部代码时在文件开头写明出处、原仓库、提交和许可证，并登记到第三方代码清单。
 - 核心代码要能在 macOS 上运行，不依赖 systemd、/proc 等 Linux 专有的东西。
 - 改完代码要运行 `python3 -m zhibo demo`，确认端到端仍然跑通，并对比 `runs/summary.md` 的指标变化。
