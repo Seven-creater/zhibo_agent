@@ -12,6 +12,9 @@
 | `zhibo/detect/fuse.py` | [hotclip](https://github.com/xixihhhh/hotclip) `src/core/highlight/moments.ts` 的按品类加权（`MOMENT_WEIGHTS.reaction`）、共振加成（`MOMENT_AGREEMENT_BONUS`）、饱和降权（`MOMENT_SATURATION`） | `3543584` | AGPL-3.0 | 思路和常数改写成 Python，用在逐秒的实时融合上 |
 | `zhibo/edit/evidence.py` | clips-studio `ARCHITECTURE.md` 4.4 节"把信号写成事件时间线文字给模型"；hotclip `src/core/highlight/vision.ts` 的九宫格拼图 | `bd39d8b`；`3543584` | AGPL-3.0 | 思路改写成 Python |
 | `zhibo/edit/package.py` | hotclip `src/core/subtitle.ts` 的字幕安全区（画面高度 62～72%）和"关键词换色"样式；clips-studio 游戏布局（摄像头 + 游戏）；OpenShorts 的模糊背景竖屏；video-alchemy 的"剪辑方案即数据" | `3543584`；`bd39d8b`；`d9f14ad`；`3c7fd6b` | AGPL-3.0；AGPL-3.0；MIT；MIT | 思路和参数，用 Python + Pillow + ffmpeg 重写 |
+| `zhibo/edit/package.py`（剪辑手法默认不加、要写理由、程序门槛） | [cut-as-code](https://github.com/WhiteTowerAI/cut-as-code) 动效 skill 的"Zero cues is valid"、逐条回答 `avoid_when`；[DaVinci-AutoEdit-Agent](https://github.com/liuluhaixiu/DaVinci-AutoEdit-Agent) `editorial-best-practices.md` 的"BGM 只在用户授权时加""保留已认可版本"；hotclip `coldopen.ts` 的离片头距离门槛 | `a96c13e6`；`93cf371`；`3543584` | MIT；MIT；AGPL-3.0 | 思路，提示词和门槛自己写 |
+| `zhibo/edit/timeline.py`、`sound.py`、`textlayer.py` | hotclip `src/core/coldopen.ts`（高潮前置、结局闪现）、`sound-design.ts`（音效打点、BGM 闪避、本地合成音效）、`fillers.ts` 与调研（去停顿时保护笑声）、`subtitle.ts`（弹入回弹参数） | `3543584` | AGPL-3.0 | 思路和参数，用 Python + Pillow + ffmpeg 重写 |
+| `zhibo/edit/camfind.py` | clips-studio `gaming/detect.py`（找主播摄像头小窗的需求和判据） | `bd39d8b` | AGPL-3.0 | 思路；实现改为让视觉大模型看一帧 |
 | `zhibo/perceive/tagger.py` | sherpa-onnx `python-api-examples/audio-tagging-from-a-file.py`；frigate `frigate/events/audio.py` 的"过音量门槛才分类、按类别设阈值" | 同上；`d20d6dc` | Apache-2.0；MIT | 参照调用方式和做法 |
 
 ## 作为外部程序或库使用

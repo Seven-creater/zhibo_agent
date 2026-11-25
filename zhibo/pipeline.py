@@ -83,6 +83,7 @@ def run_pipeline(cfg: Dict[str, Any], dataset_dir: Path, out_dir: Path) -> Dict[
     cands: List[Candidate] = []
     stages: List[Dict[str, Any]] = []
     counters: Counter = Counter()
+    packers: Dict[str, Any] = {}  # 成片包装用的剪辑方案生成器（第一次用到时创建）
     b = cfg["backtrack"]
 
     def stage(cand: Candidate, name: str, now: float, t0: float) -> None:
@@ -322,6 +323,25 @@ def run_pipeline(cfg: Dict[str, Any], dataset_dir: Path, out_dir: Path) -> Dict[
             stage(cand, "render", now, t0)
             if not cand.clip["check_ok"]:
                 cand.status, cand.note = "render_failed", "；".join(cand.clip["problems"])
+            elif v2 and cfg.get("package", {}).get("enabled"):  # 接受一段就出一段竖屏成片（edit/package.py）
+                t0 = time.time()
+                try:
+                    from .edit.package_run import package_candidate
+                    from .edit.package import GLMPlanner, MockPlanner
+
+                    use_glm = cfg["package"].get("planner", cfg["judge"].get("kind")) == "glm"
+                    if "planner" not in packers:
+                        packers["planner"] = GLMPlanner(cfg["judge"]) if use_glm else MockPlanner(cfg["package"])
+                    (out_dir / "vertical").mkdir(exist_ok=True)
+                    res = package_candidate(asdict(cand), out_dir, src, room.anchor, cfg, packers["planner"], ledger,
+                                            use_glm, out_dir / "vertical")
+                    cand.clip["vertical"] = {k: res[k] for k in ("path", "cover", "post", "duration", "hook", "zooms",
+                                                                 "sfx", "layout", "check_ok", "problems")}
+                except ImportError as e:  # 没有 Pillow（系统 Python）：只出横屏片段
+                    cand.clip["vertical"] = {"skipped": f"缺少依赖：{e}"}
+                except Exception as e:  # noqa: BLE001  包装失败不影响横屏片段
+                    cand.clip["vertical"] = {"failed": str(e)[:300]}
+                stage(cand, "package", now, t0)
 
     def process_second(t: float) -> None:
         for rid in sorted(rooms):
