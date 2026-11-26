@@ -45,6 +45,24 @@ def _quote_found(quote: str, text: str) -> float:
     return len(q & t) / len(q) if q else 0.0
 
 
+def _cut_from_segments(cut: Dict[str, int], quote: str, sents: List[Dict[str, Any]], segments: List[Dict[str, Any]],
+                       min_found: float) -> Dict[str, int]:
+    """模型偶尔把段号当句号填进 cut（EVO-032：陈泽那段该填句号 53～56，填成了段号 S20～S21 的 20～21）。
+    照抄的笑点原话不在所选句子里、但在 S{from}～S{to} 这几段的句子里时，换成这几段的句号；否则原样返回。"""
+    if not quote or quote in ("（笑声）", "(笑声)"):
+        return cut
+    if _quote_found(quote, " ".join(x["text"] for x in sents[cut["from"] - 1:cut["to"]])) >= min_found:
+        return cut
+    seg = {sg["id"]: sg for sg in segments}
+    a, b = seg.get(f"S{cut['from']}"), seg.get(f"S{cut['to']}")
+    if not a or not b:
+        return cut
+    inside = [x for x in sents if a["start"] <= (x["start"] + x["end"]) / 2 < b["end"]]
+    if inside and _quote_found(quote, " ".join(x["text"] for x in inside)) >= min_found:
+        return {"from": inside[0]["n"], "to": inside[-1]["n"]}
+    return cut
+
+
 def run_pipeline(cfg: Dict[str, Any], dataset_dir: Path, out_dir: Path) -> Dict[str, Any]:
     wall0 = time.time()
     out_dir = Path(out_dir)
@@ -265,6 +283,9 @@ def run_pipeline(cfg: Dict[str, Any], dataset_dir: Path, out_dir: Path) -> Dict[
         if cut and sents:  # 精剪：按模型给的句号范围，切点取句子起止（前留一点、后留笑声收尾）
             j = cfg["judge"]
             quote = str(cand.judge.get("key_quote") or "").strip()
+            cut = _cut_from_segments(cut, quote, sents, p.segments, float(j.get("quote_min_found", 0.5)))
+            if cut is not cand.judge["cut"]:
+                cand.judge["cut_from_segments"] = [cut["from"], cut["to"]]
             frm = cut["from"]
             # 笑点就在选的第一句里时，把前面紧挨着的一句也带上当铺垫（用户反馈：吕德华"骂一半秒怂"那段
             # 切在了"我不顶死你呀"中间，看不出他为什么发火）
@@ -284,12 +305,27 @@ def run_pipeline(cfg: Dict[str, Any], dataset_dir: Path, out_dir: Path) -> Dict[
                 cand.judge["cut_trimmed_to"] = to
             last = sents[to - 1]["end"]
             mn, mx = float(j.get("clip_min_seconds", 10)), float(j.get("clip_max_seconds", 40))
+            if cand.judge.get("payoff") == "画面":  # 画面笑点要等动作做完，上限放宽（EVO-032）
+                mx = max(mx, float(j.get("visual_clip_max_seconds", mx)))
             tail = float(j.get("cut_tail_seconds", 2))
             if last + tail - ns > mx:  # 太长：截到上限以内最后一句的结尾
                 fit = [x["end"] for x in sents[frm - 1:to] if x["end"] + tail - ns <= mx]
                 last = max(fit) if fit else ns + mx - tail
             # 最后一句后面紧接着有笑声，就把笑声留完（用户反馈：有的片段好笑的只是笑声本身）
             last = evidence.laugh_end(last, perception.get(ev.room_id, {}), ns + mx - tail)
+            if cand.judge.get("payoff") == "画面":
+                # 画面笑点：动作在台词之后，主播几乎不说话，笑声隔几秒才出来（EVO-032：陈泽 PK 受罚模仿那段，
+                # 最后一句 208.8 秒说完，学动作在 211～226 秒，笑声在 217、224 秒，原来片子停在 210.8 秒）。
+                # 往后最多看 visual_lookahead_seconds 秒，遇到主播开始说一句长话（换话题）就停，留到其中最晚的笑声
+                look = last + float(j.get("visual_lookahead_seconds", 18))
+                long_next = [x["start"] for x in sents[to:]
+                             if x["start"] >= last and len(x["text"]) >= int(j.get("visual_stop_chars", 8))]
+                if long_next:
+                    look = min(look, long_next[0])
+                tail_to = evidence.last_laugh(last, perception.get(ev.room_id, {}), min(look, ns + mx - tail))
+                if tail_to > last:
+                    cand.judge["visual_tail"] = [round(last, 3), round(tail_to, 3)]
+                    last = tail_to
             ne = max(last + tail, ns + mn)
             ns, ne = max(ns, p.start), min(ne, p.end)
             cand.start, cand.end = round(ns, 3), round(ne, 3)

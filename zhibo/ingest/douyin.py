@@ -31,17 +31,29 @@ def parse_room(arg: str) -> Dict[str, Optional[str]]:
     return {"room_id": m.group(1), "sec_uid": None, "anchor": name or m.group(1)}
 
 
-def _reflow(sec_uid: str) -> Dict[str, Any]:
-    """按主播 sec_uid 查直播间信息（不需要登录）。没开播时 status_code=10011。"""
+def live_state(sec_uid: str):
+    """按主播 sec_uid 查开播状态（不需要登录）。返回 (状态, 直播间信息)，状态是：
+    live（在播）、offline（没播：status_code=10011，或直播间 status 不是 2）、unknown（请求失败，不能下结论）。
+    直播间信息里的 id_str 是这一场的内部房间号：主播下播再开播会换一个（EVO-031 推测，待验证）。"""
     url = ("https://webcast.amemv.com/webcast/room/reflow/info/?type_id=0&live_id=1&room_id=2"
            f"&sec_user_id={sec_uid}&version_code=99.99.99&app_id=1128")
     try:
         with NO_PROXY.open(urllib.request.Request(url, headers={"User-Agent": UA}), timeout=15) as r:
             d = json.loads(r.read())
     except (OSError, json.JSONDecodeError):
-        return {}
+        return "unknown", {}
     room = (d.get("data") or {}).get("room") or {}
-    return room if d.get("status_code") == 0 and room.get("status") == 2 else {}
+    if d.get("status_code") == 0 and room.get("status") == 2:
+        return "live", room
+    if d.get("status_code") == 10011 or (d.get("status_code") == 0 and room):
+        return "offline", room
+    return "unknown", {}
+
+
+def _reflow(sec_uid: str) -> Dict[str, Any]:
+    """在播时返回直播间信息，否则返回空字典。"""
+    state, room = live_state(sec_uid)
+    return room if state == "live" else {}
 
 
 def resolve_live_room(sec_uid: str) -> Optional[str]:

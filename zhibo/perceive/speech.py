@@ -90,7 +90,30 @@ class SpeechTranscriber:
             self.rec.decode_stream(s)
             text = s.result.text.strip()
             if text:
-                out.append({"start": round(seg.start / SAMPLE_RATE, 2),
-                            "end": round((seg.start + len(seg.samples)) / SAMPLE_RATE, 2), "text": text})
+                row = {"start": round(seg.start / SAMPLE_RATE, 2),
+                       "end": round((seg.start + len(seg.samples)) / SAMPLE_RATE, 2), "text": text}
+                ts = char_offsets(text, s.result.tokens, s.result.timestamps)
+                if ts:
+                    row["ts"] = ts
+                out.append(row)
             self.vad.pop()
         return out
+
+
+def char_offsets(text: str, tokens, times) -> List[float]:
+    """把识别结果的逐词时间展开成逐字时间（相对句子开头的秒数），和 text 一一对应；对不上就返回空。
+    用途：字幕在说话停顿处切屏、按实际说话时间出字（EVO-032）。英文词是 BPE 片段，▁ 表示词前空格。"""
+    chars: List[str] = []
+    offs: List[float] = []
+    if len(tokens) != len(times):
+        return []
+    for tok, t in zip(tokens, times):
+        for ch in tok.replace("\u2581", " "):
+            chars.append(ch)
+            offs.append(round(float(t), 2))
+    joined = "".join(chars)
+    lead = len(joined) - len(joined.lstrip())
+    if joined.strip() != text:
+        return []
+    return offs[lead:lead + len(text)]
+

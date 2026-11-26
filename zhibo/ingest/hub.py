@@ -46,6 +46,15 @@ class Hub:
         d = self._req("POST", "/api/rooms/connect", {"roomId": room_id})
         return d.get("room") or d
 
+    def disconnect(self, room_id: str) -> Dict[str, Any]:
+        """断开采集（dyhub 把房间放进"已停止"保留态，再 connect 会重建连接）。"""
+        return self._req("POST", f"/api/rooms/{room_id}/disconnect")
+
+    def reconnect(self, room_id: str) -> Dict[str, Any]:
+        """断开再连：轻量内核只在连接时解析一次内部房间号，主播重开播后要重连才能收到新一场的弹幕（EVO-031）。"""
+        self.disconnect(room_id)
+        return self.connect(room_id)
+
     def room(self, room_id: str) -> Dict[str, Any]:
         return self._req("GET", f"/api/rooms/{room_id}").get("room") or {}
 

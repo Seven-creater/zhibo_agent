@@ -66,7 +66,10 @@ class AudioPerceiver:
         return rows
 
     def _abs(self, s: Dict[str, Any]) -> Dict[str, Any]:
-        return {"start": round(self.start_ts + s["start"], 3), "end": round(self.start_ts + s["end"], 3), "text": s["text"]}
+        row = {"start": round(self.start_ts + s["start"], 3), "end": round(self.start_ts + s["end"], 3), "text": s["text"]}
+        if s.get("ts"):  # 逐字时间，相对句子开头
+            row["ts"] = s["ts"]
+        return row
 
 
 def _audio_sources(data: Path) -> Dict[str, List[Dict[str, Any]]]:

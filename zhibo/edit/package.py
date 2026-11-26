@@ -34,7 +34,7 @@ from .judge import GLMJudge
 
 W, H = 1080, 1920
 FPS = 30
-PACKAGE_PROMPT_REV = "2026-11-25d"
+PACKAGE_PROMPT_REV = "2026-11-26a"  # EVO-032：标题人名照笑点写
 # 字幕里打码的脏话（平台对字幕里的脏话会限流）；可在配置 package.mask_words 里改
 MASK_WORDS = ["他妈的", "他妈", "妈的", "傻逼", "傻B", "操你", "草泥马", "尼玛"]
 ZOOM_TARGETS = ("face", "game", "center")
@@ -94,6 +94,7 @@ def plan_prompt(req: Dict[str, Any]) -> str:
         "按顺序想清楚，再输出：",
         "1. focus：一句话写这条片子好笑在哪、陌生观众要听清或看清什么才会笑。",
         "2. title：两行标题，每行不超过 12 个字。第一行交代是谁在干什么，第二行点出笑点或反转；必须是片子里真实发生的事，不夸大。"
+        "人名照笑点里写的来：笑点没说是主播本人做的，就不要把主播的名字安上去（多人连麦时做事的常常是别人）。"
         "标题和字幕已经会把笑点说出来，不要再用别的手法把同一件事说第三遍。",
         "3. highlight：最多 1 个词，就是笑点本身那个词（说错的词、翻车的那句话的核心）；没有一个明确的词就给空列表。"
         "必须原样出现在那句（修正后的）话里；不选脏话。",
@@ -306,6 +307,38 @@ def _chunks(text: str, max_chars: int, keep: Optional[str] = None) -> List[str]:
     return out or [text]
 
 
+def _chunks_timed(text: str, times: List[float], max_chars: int, keep: Optional[str] = None) -> List[Tuple[str, float]]:
+    """有逐字时间时：在说话停顿最长的地方切屏（EVO-032：按字数硬切把"眼神"拆成了两屏）。
+    返回 [(这一屏的字, 第一个字的时间)]。标点处、停顿处优先断；英文单词和高亮词 keep 不拆开。"""
+    units = []  # (开始下标, 结束下标)：不能从中间断开的最小单位
+    for m in re.finditer((re.escape(keep) + "|" if keep else "") + r"[A-Za-z0-9'*]+|\s+|.", text):
+        units.append((m.start(), m.end()))
+    out: List[Tuple[str, float]] = []
+    i, min_len = 0, max(2, max_chars // 3)
+    while i < len(units):
+        a = units[i][0]
+        if len(text) - a <= max_chars:
+            j = len(units)
+        else:
+            best, j = None, i + 1
+            for k in range(i + 1, len(units) + 1):
+                end = units[k - 1][1]
+                if end - a > max_chars:
+                    break
+                if end - a < min_len or k == len(units):
+                    continue
+                gap = times[units[k][0]] - times[end - 1]  # 断点后一个字和前一个字的时间差
+                if text[end - 1] in "，。！？、,.!?；; ":
+                    gap += 1.0
+                if best is None or gap >= best:
+                    best, j = gap, k
+        piece = text[a:units[j - 1][1]]
+        if piece.strip(" ，。、,."):
+            out.append((piece.strip().rstrip("，。、,."), times[a]))
+        i = j
+    return out
+
+
 def mask(text: str, words: List[str]) -> str:
     """把脏话换成同样长度的星号。"""
     for w in sorted(words, key=len, reverse=True):
@@ -324,6 +357,15 @@ def caption_cues(sentences: List[Dict[str, Any]], plan: Dict[str, Any], max_char
         if b - a < 0.2:
             continue
         word = plan["highlight"].get(n)
+        ts = s.get("ts")
+        if ts and len(ts) == len(text) and "t0" in s:  # 有逐字时间（改字后长度不变也能用）：按停顿切、按说话时间出字
+            timed = _chunks_timed(text, [s["t0"] + x for x in ts], max_chars, word)
+            starts = [max(a, t) for _, t in timed] + [b]
+            for (p, _), t, u in zip(timed, starts, starts[1:]):
+                if u > t:
+                    cues.append({"n": n, "start": t, "end": u, "text": p,
+                                 "highlight": word if word and word in p else None})
+            continue
         pieces = _chunks(text, max_chars, word)
         total = sum(len(p) for p in pieces) or 1
         t = a
@@ -402,7 +444,8 @@ def package_clip(clip: Path, out: Path, sentences: List[Dict[str, Any]], percept
     work.mkdir(parents=True)
     info = media.probe(clip)
     dur = float(info["duration"])
-    rel = [dict(s, start=max(0.0, s["start"] - clip_start), end=min(dur, s["end"] - clip_start)) for s in sentences]
+    rel = [dict(s, start=max(0.0, s["start"] - clip_start), end=min(dur, s["end"] - clip_start),
+                t0=s["start"] - clip_start) for s in sentences]  # t0：句子开头在片段里的时间（可能为负），逐字时间从这里算
     by_n = {i + 1: s for i, s in enumerate(rel)}
     ex = apply_gates(plan, rel, dur, p)  # 模型选的额外手法过一遍硬门槛
     punch = set(plan["highlight"]) | {e["n"] for e in plan["extras"]}

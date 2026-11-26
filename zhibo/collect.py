@@ -26,11 +26,14 @@ from typing import Any, Deque, Dict, List, Optional
 
 from .detect.attribution import CAUSE_ZH, attribute
 from .core.models import RawMessage, Room
-from .ingest.douyin import parse_room, resolve_live_room
+from .ingest.douyin import live_state, parse_room, resolve_live_room
 from .ingest.hub import Hub, start_hub
 from .ingest.recorder import Recorder
 from .act.replay import ReplayPolicy
 from .engine import RoomEngine
+
+# 检查开播状态的起因（日志用）
+WHY_ZH = {"init": "开始采集时", "control": "收到直播状态消息", "recheck": "定时复查", "stall": "弹幕长时间为 0"}
 
 SPECIAL_METHODS = [  # 未标准化消息按方法名归类（PK 类消息能否拿到是需求文档 Q-1）
     (re.compile(r"LuckyBox|Lottery", re.I), "lucky_bag"),
@@ -62,6 +65,15 @@ class Collector:
         self.minute: Dict[str, Counter] = defaultdict(Counter)
         self.methods: Dict[str, Counter] = defaultdict(Counter)
         self.online: Dict[str, int] = {}
+        # 直播状态跟踪（EVO-031）：dyhub 轻量内核不处理下播，也不会跟着主播重开播换到新一场
+        live_cfg = cfg.get("live", {})
+        self.stall_seconds = float(live_cfg.get("chat_stall_seconds", 180))
+        self.end_after = float(live_cfg.get("end_after_offline_minutes", 20)) * 60
+        self.last_chat: Dict[str, float] = {}
+        self.ctrl_at: Dict[str, float] = {}  # 最近一次收到 WebcastControlMessage（直播状态变化）的时间
+        self.iid: Dict[str, str] = {}  # 这一场的内部房间号（reflow 接口的 id_str）
+        self.ended: Dict[str, float] = {}  # 已下播的直播间 → 确认下播的时间
+        self.reconnected_at: Dict[str, float] = {}
         self.recorders: Dict[str, Recorder] = {}
         # 融合检测要实时声音：录制进程多出一路 PCM，交给单独的感知线程（perceive/listener.py）
         self.fused = cfg["heat"].get("kind", "chat_z") == "fused"
@@ -233,9 +245,92 @@ class Collector:
             msg += "，不保留录像"
         self.log(msg)
 
+    def _sec_uid(self, rid: str) -> Optional[str]:
+        r = self.rooms[rid]
+        if not r.get("sec_uid"):
+            r["sec_uid"] = self.recorders[rid].sec_uid or (self.hub.room(rid).get("meta") or {}).get("secUid")
+        return r.get("sec_uid")
+
+    def _reconnect(self, rid: str, now: float) -> None:
+        self.reconnected_at[rid] = now
+        try:
+            self.hub.reconnect(rid)
+        except OSError as e:
+            self.log(f"[弹幕] {self.rooms[rid]['anchor']} 重连失败：{e}")
+
+    def _chat_stalled(self, rid: str, now: float) -> bool:
+        """还在录（直播流在来），但弹幕已经很久一条都没有：多半是弹幕连接还挂在旧的一场上。"""
+        if rid not in self.last_chat or not self.recorders[rid].recording():
+            return False
+        return now - max(self.last_chat[rid], self.reconnected_at.get(rid, 0)) > self.stall_seconds
+
+    def _watch_live(self, rid: str, now: float, checked: Dict[str, float]) -> None:
+        """按主页查一次开播状态：下播就停录、断开弹幕；重开播（内部房间号变了）或弹幕卡住就重连弹幕。"""
+        last = checked.get(rid, 0.0)
+        if rid not in self.iid and rid not in self.ended:
+            why = "init"
+        elif self.ctrl_at.get(rid, 0) > last:
+            why = "control"
+        elif rid in self.ended and now - last >= 60:
+            why = "recheck"
+        elif rid not in self.ended and self._chat_stalled(rid, now):
+            why = "stall"
+        else:
+            return
+        sec = self._sec_uid(rid)
+        if not sec:
+            return
+        state, room = live_state(sec)
+        if state == "unknown" or (state == "offline" and self.recorders[rid].recording()):
+            return  # 查询失败，或接口说没播但直播流还在来：不下结论，下一轮（30 秒后）再查
+        checked[rid] = now
+        anchor = self.rooms[rid]["anchor"]
+        if state == "offline":
+            if rid not in self.ended:
+                self.ended[rid] = now
+                self.recorders[rid].live = False
+                self.hub.disconnect(rid)
+                self.log(f"[下播] {anchor}（{rid}）已下播（{WHY_ZH[why]}查到），停止录制和弹幕，之后每分钟查一次是否重新开播")
+            return
+        iid, prev = str(room.get("id_str") or ""), self.iid.get(rid)
+        if iid:
+            self.iid[rid] = iid
+        if rid in self.ended:
+            del self.ended[rid]
+            self.log(f"[重新开播] {anchor}（{rid}）又开播了，内部房间号 {prev} → {iid}，重连弹幕")
+            self._reconnect(rid, now)
+        elif prev and iid and iid != prev:
+            self.log(f"[换场] {anchor}（{rid}）内部房间号 {prev} → {iid}（{WHY_ZH[why]}查到），重连弹幕")
+            self._reconnect(rid, now)
+        elif why == "stall":
+            self.log(f"[弹幕] {anchor} 已 {now - self.last_chat[rid]:.0f} 秒没收到弹幕，但还在播（内部房间号 {iid} 没变），重连弹幕")
+            self._reconnect(rid, now)
+        elif why == "init":
+            self.log(f"[状态] {anchor}（{rid}）这一场的内部房间号 {iid}")
+
+    def _maybe_finish(self, now: float) -> None:
+        """所有直播间都已下播超过 end_after_offline_minutes，且没有还在等开播的主播，就提前结束采集。"""
+        if self.end_after <= 0 or self.pending or not self.rooms or len(self.ended) < len(self.rooms):
+            return
+        if now - max(self.ended.values()) >= self.end_after:
+            self.log(f"[收工] 所有主播都已下播 {self.end_after / 60:.0f} 分钟以上，提前结束采集")
+            self.stop.set()
+
     def _keep_connected(self) -> None:
+        checked: Dict[str, float] = {}
         while not self.stop.is_set():
+            now = time.time()
             for rid in list(self.rooms):
+                try:
+                    self._watch_live(rid, now, checked)
+                except OSError as e:
+                    self.log(f"[状态] {self.rooms[rid]['anchor']} 查开播状态出错：{e}")
+                if rid in self.ended:
+                    self.recorders[rid].live = False
+                    if self.status[rid] != "ended":
+                        self.log(f"[状态] {self.rooms[rid]['anchor']}（{rid}）：{self.status[rid]} → ended")
+                        self.status[rid] = "ended"
+                    continue
                 info = self.hub.room(rid)
                 st = info.get("status") or "not_connected"
                 if st in ("closed", "error", "stopped", "not_connected"):
@@ -245,6 +340,7 @@ class Collector:
                 if st != self.status[rid]:
                     self.log(f"[状态] {self.rooms[rid]['anchor']}（{rid}）：{self.status[rid]} → {st}")
                     self.status[rid] = st
+            self._maybe_finish(now)
             self.stop.wait(30)
 
     def _monitor(self) -> None:
@@ -296,6 +392,7 @@ class Collector:
                 self.last_ts[rid] = recv
                 self.q.put((rid, RawMessage(rid, recv, m["type"], m["payload"])))
                 if m["type"] == "chat":
+                    self.last_chat[rid] = recv
                     self.minute[rid]["chat"] += 1
                     if any(w in m["payload"]["text"] for w in laugh_words):
                         self.minute[rid]["laugh"] += 1
@@ -305,6 +402,8 @@ class Collector:
                     self.recorders[rid].live = m["payload"]["status"] == "live"
                 elif m["type"] in ("other", "lucky_bag", "red_packet", "pk"):
                     self.methods[rid][m["payload"]["method"]] += 1
+                    if m["payload"]["method"] == "WebcastControlMessage":
+                        self.ctrl_at[rid] = recv
         except KeyboardInterrupt:
             self.log("收到 Ctrl+C，正在收尾……")
         finally:

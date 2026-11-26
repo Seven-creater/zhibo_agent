@@ -12,6 +12,7 @@ import base64
 import json
 import os
 import re
+import time
 import urllib.error
 import urllib.request
 from pathlib import Path
@@ -29,11 +30,12 @@ OUTPUT_SPEC = {
 }
 # 证据包第 2 版多一个 cut：最精简版本从第几句到第几句（句号见提示里主播原话前的 [n]），切点由程序按句子起止算
 # 第 2 版提示的修订号：改了 prompt_v2() 的写法就改这里。它放进请求里，所以提示一改账本就会重新调用
-PROMPT_REV_V2 = "2026-11-24d"
+PROMPT_REV_V2 = "2026-11-26a"  # EVO-032：台词/画面笑点、连麦不默认是主播
 OUTPUT_SPEC_V2 = {"event": "一句话说发生了什么", "punchline": "笑点到底是什么（说不清就是没有）", "funny_score": 8,
                   "worth_clipping": True, "reason": "值不值得切的理由",
                   "structure": {"setup": ["段号"], "climax": ["段号"], "reaction": ["段号"]},
-                  "cut": {"from": 12, "to": 18}, "key_quote": "笑点那句主播原话（从上面照抄）", "title": "建议标题"}
+                  "payoff": "台词", "cut": {"from": 12, "to": 18}, "key_quote": "笑点那句主播原话（从上面照抄）",
+                  "title": "建议标题"}
 
 
 class MockJudge:
@@ -124,6 +126,7 @@ class GLMJudge:
         self.thinking_budget = int(cfg.get("thinking_budget", 1200))
         self.timeout = float(cfg.get("timeout", 180))
         self.retry_max_tokens = int(cfg.get("retry_max_tokens", 16000))
+        self.retry_waits = [float(x) for x in cfg.get("retry_waits", [15, 45, 90])]
         self.base_dir = Path(".")  # 由主流程设成本次运行的输出目录，截图路径相对于它
 
     @staticmethod
@@ -168,11 +171,17 @@ class GLMJudge:
             lines += [f"- {t}" for t in taste]
         lines += [
             "如果合格，在 structure 里指出铺垫、高潮、观众反应各是哪几段；",
-            f"再在 cut 里给出最精简的版本：从第几句到第几句（主播原话前方括号里的句号）。cut 的目标是 {request.get('target_seconds', '15～30')} 秒："
-            "只留让人看懂所需的一两句铺垫和笑点本身，宁短勿长；cut 的最后一句就是笑点那一句，"
-            "不要为了留观众反应去多选后面的句子（程序会在最后一句后自动多留 2 秒）。"
-            "key_quote 照抄 cut 范围里笑点那句主播原话（可以只抄关键的一部分）；如果笑点是笑声本身，写（笑声）。"
-            "注意：弹幕比画面晚，后面几段弹幕还在刷的梗，笑点往往已经在前面说完了；cut 必须选到笑点真正说出来的那几句。"
+            f"再在 cut 里给出最精简的版本：从第几句到第几句（主播原话前方括号里的句号）。cut 的目标是 {request.get('target_seconds', '15～30')} 秒。"
+            "先判断笑点是哪一种，写在 payoff 里（只能填「台词」或「画面」）：",
+            "- 台词：笑点是一句话（口误、怼人、反差的回答）。cut 只留让人看懂所需的一两句铺垫和笑点本身，宁短勿长；"
+            "cut 的最后一句就是笑点那一句，不要为了留观众反应去多选后面的句子（程序会在最后一句后自动多留 2 秒）。"
+            "注意：弹幕比画面晚，后面几段弹幕还在刷的梗，台词笑点往往已经在前面说完了；cut 必须选到笑点真正说出来的那几句。",
+            "- 画面：笑点是画面上的动作或表演（受罚、模仿、做表情、跳舞、操作翻车），台词只是铺垫或点评。"
+            "cut 要一直选到动作做完：动作期间主播可能只说几个字、只有笑声，这些短句也要选进来；只有台词没有动作的片子，观众看不到笑点。"
+            "程序还会把动作期间稍晚出现的笑声留完。",
+            "多人连麦或 PK 时，画面里做事的人不一定是主播本人：event、punchline、title 里只写你能从画面或原话确定的人，"
+            "弹幕里叫的名字可以参考，不确定就写「连麦的兄弟」这类说法。",
+            "key_quote 照抄 cut 范围里笑点那句主播原话（可以只抄关键的一部分）；如果笑点是笑声本身或画面动作、没有关键台词，写（笑声）。"
             "主播原话后面标了（笑声）的，表示那句话期间或紧接着有笑声；如果好笑的只是笑声本身，cut 只选笑声前一句和带笑声的那句。"
             "程序会在最后一句之后把紧接着的笑声留完。",
             "如果只是福袋、抽奖、刷礼物、复制粘贴的弹幕刷屏、单纯聊天，或者说不清笑点，worth_clipping 填 false。",
@@ -251,11 +260,21 @@ class GLMJudge:
             headers={"x-api-key": self.key, "Authorization": f"Bearer {self.key}",
                      "anthropic-version": "2023-06-01", "Content-Type": "application/json"},
         )
-        try:
-            with urllib.request.urlopen(req, timeout=self.timeout) as r:
-                return json.loads(r.read())
-        except urllib.error.HTTPError as e:
-            raise RuntimeError(f"GLM HTTP {e.code}: {e.read()[:300].decode('utf-8', 'replace')}")
+        # 限流（429）和服务端临时错误（5xx）等一会儿再试；EVO-031：服务器第一晚 7 次判定里有 3 次 429，
+        # 原来直接记成失败，要整个重跑才补上
+        waits = list(self.retry_waits)
+        while True:
+            try:
+                with urllib.request.urlopen(req, timeout=self.timeout) as r:
+                    return json.loads(r.read())
+            except urllib.error.HTTPError as e:
+                body = e.read()[:300].decode("utf-8", "replace")
+                if (e.code == 429 or e.code >= 500) and waits:
+                    wait = waits.pop(0)
+                    print(f"[GLM] HTTP {e.code}，{wait:.0f} 秒后重试（还能重试 {len(waits)} 次）", flush=True)
+                    time.sleep(wait)
+                    continue
+                raise RuntimeError(f"GLM HTTP {e.code}: {body}")
 
 
 JUDGES = {"mock": MockJudge, "accept_all": AcceptAllJudge, "glm": GLMJudge}
@@ -296,6 +315,8 @@ def validate(text: Optional[str], segment_ids: List[str], n_sentences: int = 0) 
             errs.append("funny_score 要是 1～10 的整数")
     if n_sentences and obj.get("worth_clipping") is True and not isinstance(obj.get("key_quote"), str):
         errs.append("值得切时要有 key_quote（笑点那句主播原话，或（笑声））")
+    if obj.get("payoff") not in (None, "台词", "画面"):  # 宽容：认不出就当台词笑点（原来的做法），不让模型重答
+        obj["payoff"] = "画面" if "画面" in str(obj.get("payoff")) else "台词"
     if n_sentences and obj.get("worth_clipping") is True:  # 证据包第 2 版：值得切时要给精剪的句号范围
         cut = obj.get("cut")
         try:

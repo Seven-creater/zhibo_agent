@@ -87,9 +87,18 @@ class Recorder(threading.Thread):
         if self.sec_uid:
             url = quality_stream_url(self.sec_uid, self.quality)
             if url:
+                self._fallback_logged = False
                 return url
-        self.log(f"[录制] {self.room_id} 取不到指定清晰度，退回播放器地址（可能是原画）")
+        if not self._fallback_logged:  # 下播后会每 10 秒重试一次，只记第一次（EVO-031：曾刷了几百行）
+            self.log(f"[录制] {self.room_id} 取不到指定清晰度，退回播放器地址（可能是原画）")
+            self._fallback_logged = True
         return self.hub.stream_url(self.room_id)
+
+    _fallback_logged = False
+
+    def recording(self) -> bool:
+        """录制进程正在跑（直播流还在来）。"""
+        return self.proc is not None and self.proc.poll() is None
 
     def _scan(self, sess: Path, start: float, known: set) -> None:
         """读 ffmpeg 写的分段清单（每完成一段写一行：文件名,起,止，相对本段录制开头）。"""

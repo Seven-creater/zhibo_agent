@@ -13,6 +13,7 @@
     "target_seconds": "10～20",
     "clip_min_seconds": 8,
     "clip_max_seconds": 25,
+    "visual_clip_max_seconds": 35,
     "max_sentence_gap": 4,
     "cut_pre_seconds": 3,
     "cut_tail_seconds": 2,

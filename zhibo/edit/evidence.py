@@ -48,6 +48,13 @@ def laugh_end(after: float, perception: Dict[int, Dict[str, Any]], limit: float,
     return min(max(end, after), limit)
 
 
+def last_laugh(after: float, perception: Dict[int, Dict[str, Any]], limit: float) -> float:
+    """(after, limit) 里最晚一次笑声（概率 ≥ LAUGH_MARK）那一秒的结尾；没有就返回 after。
+    画面笑点用：动作在台词之后，笑声常常隔几秒、断断续续地出来（EVO-032）。"""
+    hits = [t + 1.0 for t in range(int(after) + 1, int(limit)) if perception.get(t, {}).get("laugh", 0.0) >= LAUGH_MARK]
+    return min(max(hits), limit) if hits else after
+
+
 def window_sentences(transcript: List[Dict[str, Any]], a: float, b: float) -> List[Dict[str, Any]]:
     """宽窗口里的句子，从 1 开始编号。模型精剪时只报句号，切点由程序按句子的起止时间算（FR-6.5）。"""
     sents = sorted((x for x in transcript if a <= (x["start"] + x["end"]) / 2 < b), key=lambda x: x["start"])

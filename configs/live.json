@@ -13,7 +13,9 @@
     ],
     "replay_seconds": 300,
     "pin_pre_seconds": 60,
-    "pin_post_seconds": 20
+    "pin_post_seconds": 20,
+    "chat_stall_seconds": 180,
+    "end_after_offline_minutes": 20
   },
   "retention": {
     "video_days": 3
