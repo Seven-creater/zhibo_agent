@@ -11,7 +11,7 @@ import shutil
 import copy
 import time
 from collections import Counter, deque
-from dataclasses import asdict
+from dataclasses import asdict, replace
 from pathlib import Path
 from typing import Any, Dict, List
 
@@ -27,7 +27,7 @@ from .edit.render import render_clip
 from .evaluate.report import write_report
 from .act.scheduler import Scheduler
 from .act.replay import ReplayPolicy
-from .edit import evidence
+from .edit import avsync, evidence
 from .engine import RoomEngine
 from .ingest.sources import ReplaySource
 
@@ -109,10 +109,9 @@ def run_pipeline(cfg: Dict[str, Any], dataset_dir: Path, out_dir: Path) -> Dict[
 
     def rec_bounds(rec) -> List[float]:
         key = str(rec.path)
-        if key not in bounds:
-            rel = media.silence_boundaries(rec.path, b["silence_noise_db"], b["silence_min_seconds"])
-            bounds[key] = [rec.start_ts + x for x in rel]
-        return bounds[key]
+        if key not in bounds:  # 存录像内的相对时间：对时后同一个文件的起点会变
+            bounds[key] = media.silence_boundaries(rec.path, b["silence_noise_db"], b["silence_min_seconds"])
+        return [rec.start_ts + x for x in bounds[key]]
 
     def handle(ev: HeatEvent, now: float) -> None:
         events.append(ev)
@@ -134,6 +133,9 @@ def run_pipeline(cfg: Dict[str, Any], dataset_dir: Path, out_dir: Path) -> Dict[
                 status="lost_not_recording", note="高潮时刻没有录像（录制中断或还没开始）",
             ))
             return
+        sync = avsync.measure(rec.path, rec.start_ts, ev.peak, transcripts.get(ev.room_id, []), cfg) if v2 else None
+        if sync:  # 画面比逐句稿晚 offset 秒：把录像起点往前挪，之后截图、切片都按逐句稿的时间对齐（EVO-033）
+            rec = replace(rec, start_ts=rec.start_ts - sync["offset"])
         if v2:  # 宽窗口 = 实时即时重放会保存的区间，切点吸附到句子停顿（没有逐句稿时退回静音边界）
             tr = transcripts.get(ev.room_id, [])
             sent = evidence.sentence_bounds(tr, rec.start_ts, rec.start_ts + rec.duration)
@@ -356,6 +358,8 @@ def run_pipeline(cfg: Dict[str, Any], dataset_dir: Path, out_dir: Path) -> Dict[
         if cfg["render"]["enabled"]:
             t0 = time.time()
             cand.clip = render_clip(cand, rec, out_dir, cfg, transcripts.get(ev.room_id) if v2 else None)
+            if sync:
+                cand.clip["av_offset"] = sync["offset"]
             stage(cand, "render", now, t0)
             if not cand.clip["check_ok"]:
                 cand.status, cand.note = "render_failed", "；".join(cand.clip["problems"])

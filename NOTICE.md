@@ -35,6 +35,7 @@
 | silero_vad_v5.onnx | [silero-vad](https://github.com/snakers4/silero-vad)，经 sherpa-onnx 发布页 | MIT |
 | sherpa-onnx-sense-voice-zh-en-ja-ko-yue-int8-2025-09-09 | [SenseVoice](https://github.com/FunAudioLLM/SenseVoice)（FunAudioLLM），经 sherpa-onnx 转换 | 仓库为 MIT；模型权重的许可条款【待核实】 |
 | sherpa-onnx-zipformer-small-audio-tagging-2024-04-15 | k2-fsa（icefall 训练，AudioSet） | Apache-2.0 |
+| sherpa-onnx-qwen3-asr-0.6B-int8-2026-03-25 | [Qwen3-ASR](https://github.com/QwenLM/Qwen3-ASR)（Qwen 团队），ONNX 由 [Wasser1462/Qwen3-ASR-onnx](https://github.com/Wasser1462/Qwen3-ASR-onnx) 导出，经 sherpa-onnx 发布页；出片前重识别字幕（EVO-035） | Qwen3-ASR 为 Apache-2.0；导出仓库没有声明许可证【待核实】 |
 
 ## 借鉴了思路、还没复用代码的项目
 

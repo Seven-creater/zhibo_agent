@@ -63,6 +63,11 @@ def checks(cfg: Dict[str, Any], data_root: Path) -> List[Tuple[str, str, str]]:
     for name in (VAD_FILE, SENSE_VOICE_DIR, TAGGER_DIR):
         add(OK if (md / name).exists() else FAIL, f"模型 {name}", "已下载" if (md / name).exists()
             else "没有。运行 sh scripts/fetch_models.sh")
+    a = cfg.get("asr", {})
+    if a.get("enabled") and a.get("engine", "local") == "local":  # 出片前重识别字幕的大模型（EVO-035）
+        name = (a.get("local") or {}).get("dir", "")
+        add(OK if name and (md / name).exists() else FAIL, f"模型 {name}（字幕重识别）",
+            "已下载" if name and (md / name).exists() else "没有。运行 sh scripts/fetch_models.sh，或在配置里关掉 asr.enabled")
 
     try:
         from .edit.textlayer import resolve_font

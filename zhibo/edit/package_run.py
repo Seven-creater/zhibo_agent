@@ -36,18 +36,41 @@ def package_candidate(c: Dict[str, Any], run: Path, src: ReplaySource, anchor: s
     p = cfg.get("package", {})
     perception = src.perception(c["room_id"])
     sents = [s for s in src.transcript(c["room_id"]) if s["end"] > c["start"] and s["start"] < c["end"]]
+    clip = run / c["clip"]["path"]
+    a = cfg.get("asr", {})
+    asr_info = None
+    if a.get("enabled") and (use_glm or a.get("engine", "local") == "local"):  # 字幕文字逐句重识别（EVO-034、035）
+        from .recaption import recaption, shared
+
+        try:
+            asr = shared(cfg)
+        except Exception as e:  # noqa: BLE001  没装模型等：字幕照旧用逐句稿
+            asr, asr_info = None, {"error": f"{type(e).__name__}: {e}"}
+            print(f"[字幕] 重识别模型加载失败，保留逐句稿：{e}", flush=True)
+        if asr is not None:
+            if hasattr(asr, "base_dir"):
+                asr.base_dir = run
+            n0 = len(sents)
+            sents = recaption(sents, clip, c["start"], cfg, ledger, asr, out_dir / f"{c['cand_id']}_asr",
+                              [anchor] + list(a.get("hotwords") or []))
+            asr_info = {"model": asr.model, "sentences": n0, "dropped": n0 - len(sents),
+                        "changed": sum(1 for s in sents if "text_local" in s and s["text"] != s["text_local"]),
+                        "status": sorted({s.get("asr", "") for s in sents}),
+                        "error": getattr(asr, "disabled", "") or None,
+                        "lines": [[round(s["start"] - c["start"], 1), s.get("text_local", s["text"]), s["text"]]
+                                  for s in sents]}
     prev_end: Optional[float] = None
     for s in sents:
         s["laugh"] = evidence.sentence_laugh(s, perception) >= evidence.LAUGH_MARK
         s["gap_before"] = 0.0 if prev_end is None else max(0.0, s["start"] - prev_end)
         prev_end = s["end"]
-    clip = run / c["clip"]["path"]
     layout = choose_layout(anchor, clip, c["end"] - c["start"], cfg, ledger, out_dir / f"{c['cand_id']}_camfind", use_glm)
     plan = make_plan(planner, ledger, plan_request(anchor, c.get("judge") or {}, sents, layout["kind"],
                                                     c["start"], c["end"] - c["start"], p))
     bgm = Path(p["bgm"]) if p.get("bgm") and Path(p["bgm"]).exists() else None
     res = package_clip(clip, out_dir / f"{c['cand_id']}.mp4", sents, perception, c["start"], plan, layout, p, bgm)
     res["plan"] = plan
+    res["asr"] = asr_info
     res["layout_source"] = layout.get("source")
     res["cam_box"] = layout.get("cam")
     for k in ("path", "cover", "post"):
